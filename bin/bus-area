@@ -100,9 +100,9 @@ def cmd_list(_):
 def cmd_up(a):
     name, lane = area(a.area)
     sp = find_space(name)
-    if sp:
+    if sp and not a.resume:
         app("space.select", id=sp["id"])
-        print(f"{name}: space already open")
+        print(f"{name}: space already open (to bring back an ended PM: --resume <session-id>)")
         return
     task = (f"/area-pm {name}\n\nYou are the {name} area PM. Your agent-bus lane is "
             f"`{lane}` (set by AGENT_BUS_LANE); take the lane PM role with "
@@ -119,7 +119,12 @@ def cmd_up(a):
                 f"implementers with `bus-area ticket {a.area} ENG-123 <slug>`. Then carry on.")
     if a.brief:
         task += f"\n\nFrom the lead: {a.brief}"
-    app("space.new", name=name, folder=REPO, tab="PM", argv=argv, task=task)
+    if sp:  # the space outlived its PM: put the PM back in a tab of its own, first
+        r = app("tab.new", name="PM", space=sp["id"], folder=REPO, argv=argv, task=task)
+        app("tab.move", id=r["tab"], index=0)
+        app("space.select", id=sp["id"])
+    else:
+        app("space.new", name=name, folder=REPO, tab="PM", argv=argv, task=task)
     print(f"{name}: space opened, PM {'resuming' if a.resume else 'starting'} in tab PM (lane @{lane})")
 
 
