@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Plan usage for each signed-in Claude and Codex account, as JSON (for the Herdr `usage` mod).
+
+Accounts come from ~/.config/herdr-mods/config.json ("usage"), or $HERDR_MODS_CONFIG.
+
+Reads each account's OAuth token from the macOS keychain, where Claude Code keeps it,
+and asks Anthropic's usage endpoint. Never refreshes a token (that would rotate it
+under Claude Code); an expired one shows as stale until a session on that account
+runs again. Tokens never leave this process.
+"""
+import hashlib, json, os, subprocess, time, urllib.request, ssl, sys
+
+CONFIG = os.path.expanduser(os.environ.get("HERDR_MODS_CONFIG", "~/.config/herdr-mods/config.json"))
+
+
+def load_config():
+    """Accounts from the config's "usage" section; without one, the default Claude and Codex sign-ins."""
+    try:
+        u = json.load(open(CONFIG)).get("usage", {})
+    except (OSError, ValueError):
+        u = {}
+    claude = u.get("claude") or [{"label": "Claude", "config_dir": None}]
+    codex = u.get("codex") or [{"label": "Codex", "home": "~/.codex"}]
+    return claude, codex
+
+
+def keychain_service(config_dir):
+    # Claude Code names its keychain item after the config dir it runs with:
+    # none set -> "Claude Code-credentials", else a suffix of sha256(absolute path).
+    if not config_dir:
+        return "Claude Code-credentials"
+    path = os.path.abspath(os.path.expanduser(config_dir))
+    return "Claude Code-credentials-" + hashlib.sha256(path.encode()).hexdigest()[:8]
+API = "https://api.anthropic.com/api/oauth/"
+try:
+    import certifi
+    CTX = ssl.create_default_context(cafile=certifi.where())
+except ImportError:
+    CTX = ssl.create_default_context(cafile="/etc/ssl/cert.pem")
+
+
+def get(path, tok):
+    req = urllib.request.Request(API + path, headers={"Authorization": f"Bearer {tok}", "anthropic-beta": "oauth-2025-04-20"})
+    return json.load(urllib.request.urlopen(req, timeout=15, context=CTX))
+
+
+def account(label, service):
+    out = {"label": label, "limits": []}
+    r = subprocess.run(["security", "find-generic-password", "-s", service, "-w"], capture_output=True, text=True)
+    if r.returncode:
+        return {**out, "error": "not signed in"}
+    o = json.loads(r.stdout).get("claudeAiOauth", {})
+    out["plan"] = o.get("subscriptionType")
+    if o.get("expiresAt", 0) / 1000 < time.time():
+        return {**out, "error": "token expired, open a session on this account"}
+    tok = o["accessToken"]
+    try:
+        u = get("usage", tok)
+        p = get("profile", tok)
+    except Exception as e:
+        return {**out, "error": str(e)[:120]}
+    out["email"] = p.get("account", {}).get("email")
+    limits = u.get("limits") or []
+    if limits:
+        for l in limits:
+            sc = (l.get("scope") or {}).get("model") or {}
+            name = {"weekly_all": "Week", "session": "5 hours", "five_hour": "5 hours"}.get(l["kind"], l["kind"])
+            if sc.get("display_name"): name = f"Week · {sc['display_name']}"
+            out["limits"].append({"name": name, "kind": l["kind"], "percent": l.get("percent", 0), "resets_at": l.get("resets_at"), "severity": l.get("severity")})
+    for key, name in (("five_hour", "5 hours"), ("seven_day", "Week")):
+        w = u.get(key)
+        if w and not any(x["name"] == name for x in out["limits"]):
+            out["limits"].append({"name": name, "kind": key, "percent": w.get("utilization", 0), "resets_at": w.get("resets_at")})
+    order = {"5 hours": 0, "Week": 1}
+    out["limits"].sort(key=lambda x: order.get(x["name"], 2))
+    sp = u.get("spend") or {}
+    if sp.get("enabled"):
+        used, lim = sp["used"], sp["limit"]
+        out["extra"] = {"used": used["amount_minor"] / 10 ** used["exponent"], "limit": lim["amount_minor"] / 10 ** lim["exponent"]}
+    return out
+
+
+def codex(label, home):
+    import base64
+    out = {"label": label, "limits": []}
+    try:
+        t = json.load(open(os.path.join(os.path.expanduser(home), "auth.json")))["tokens"]
+    except Exception:
+        return {**out, "error": "not signed in"}
+    claims = json.loads(base64.urlsafe_b64decode(t["access_token"].split(".")[1] + "=="))
+    if claims.get("exp", 0) < time.time():
+        return {**out, "error": "token expired, open a Codex session on this account"}
+    req = urllib.request.Request("https://chatgpt.com/backend-api/wham/usage", headers={
+        "Authorization": f"Bearer {t['access_token']}", "ChatGPT-Account-Id": t["account_id"], "User-Agent": "codex-cli"})
+    try:
+        u = json.load(urllib.request.urlopen(req, timeout=15, context=CTX))
+    except Exception as e:
+        return {**out, "error": str(e)[:120]}
+    out["email"], out["plan"] = u.get("email"), u.get("plan_type", "").replace("self_serve_", "").replace("_prolite", "")
+    def win(w, kind):
+        if not w: return
+        secs = w.get("limit_window_seconds", 0)
+        name = "Week" if secs >= 6 * 86400 else f"{round(secs / 3600)} hours"
+        out["limits"].append({"name": name, "kind": kind, "window": secs, "percent": w.get("used_percent", 0),
+                              "resets_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(w["reset_at"])) if w.get("reset_at") else None})
+    rl = u.get("rate_limit") or {}
+    win(rl.get("primary_window"), "primary"); win(rl.get("secondary_window"), "secondary")
+    out["limits"].sort(key=lambda x: x["window"])
+    if rl.get("limit_reached"): out["error"] = "limit reached"
+    return out
+
+
+claude_accts, codex_accts = load_config()
+print(json.dumps({"at": int(time.time()),
+                  "accounts": [account(a["label"], keychain_service(a.get("config_dir"))) for a in claude_accts],
+                  "codex": [codex(a["label"], a.get("home", "~/.codex")) for a in codex_accts]}))

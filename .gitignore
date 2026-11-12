@@ -1,0 +1,4 @@
+*.d.ts
+jsconfig.json
+__pycache__/
+config.json

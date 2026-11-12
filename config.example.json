@@ -1,0 +1,22 @@
+{
+  "usage": {
+    "claude": [
+      { "label": "Work", "config_dir": null },
+      { "label": "Personal", "config_dir": "~/.claude-personal" }
+    ],
+    "codex": [
+      { "label": "Personal", "home": "~/.codex" },
+      { "label": "Work", "home": "~/.codex-work" }
+    ]
+  },
+  "areas": {
+    "repo": "~/code/acme/monorepo",
+    "worktrees": "~/.herdr/worktrees/monorepo",
+    "lead_env": ["AGENT_BUS_TOOL=lead", "AGENT_BUS_WT=you"],
+    "lead_owner": "lead/you",
+    "list": [
+      { "slug": "checkout", "name": "Checkout", "lane": "checkout" },
+      { "slug": "search",   "name": "Search",   "lane": "search" }
+    ]
+  }
+}

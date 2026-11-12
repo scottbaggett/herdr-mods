@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""Run a product area inside Herdr desktop, wired to agent-bus.
+
+One area = one Herdr space = one top-level agent-bus lane, with its PM in the
+first tab and one tab (own worktree) per ticket. A ticket's agent keeps its own
+lane (eng-123, from the branch) and is started with
+AGENT_BUS_LANE_PARENT=<area lane>, which nests that lane under the area, so the
+area PM supervises it (needs agent-bus with nested lanes).
+
+  bus-area list                       areas, their space, PM and seats
+  bus-area up <area> [--resume <session-id>] [--brief "<what this PM covers>"]
+                                       open the area's space and start its PM
+                                       (or resume an earlier PM chat there)
+  bus-area ticket <area> ENG-123 <slug> [--base origin/develop] [--model m]
+                                       worktree + tab + implementer for a ticket
+"""
+import argparse, json, os, re, subprocess, sys
+
+CONFIG = os.path.expanduser(os.environ.get("HERDR_MODS_CONFIG", "~/.config/herdr-mods/config.json"))
+
+
+def load_areas():
+    try:
+        c = json.load(open(CONFIG))["areas"]
+    except (OSError, ValueError, KeyError):
+        sys.exit(f"no \"areas\" section in {CONFIG}; see README")
+    repo = os.path.expanduser(c["repo"])
+    worktrees = os.path.expanduser(c.get("worktrees") or f"~/.herdr/worktrees/{os.path.basename(repo)}")
+    return repo, worktrees, {a["slug"]: (a["name"], a["lane"]) for a in c["list"]}
+
+
+# Areas come from the config's "areas" section. Keep lanes in sync with ~/.agents/bus/projects.json.
+REPO, WORKTREES, AREAS = load_areas()
+REPO_NAME = os.path.basename(REPO)
+
+
+def sh(*a, **kw):
+    return subprocess.run(a, capture_output=True, text=True, **kw)
+
+
+def app(cmd, **params):
+    args = ["herdr-app", "do", cmd]
+    for k, v in params.items():
+        if v is None:
+            continue
+        args += [f"--{k}", v if isinstance(v, str) else json.dumps(v)]
+    r = sh(*args)
+    try:
+        out = json.loads(r.stdout or "{}")
+    except json.JSONDecodeError:
+        sys.exit(f"herdr-app {cmd}: {r.stdout or r.stderr}")
+    if isinstance(out, dict) and out.get("error"):
+        sys.exit(f"herdr-app {cmd}: {out['error']}")
+    return out
+
+
+def spaces():
+    r = sh("herdr-app", "ls")
+    if r.returncode:
+        sys.exit("Herdr desktop isn't running (herdr-app ls failed).")
+    return json.loads(r.stdout)["spaces"]
+
+
+def find_space(name):
+    return next((s for s in spaces() if (s.get("name") or "").lower() == name.lower()), None)
+
+
+def area(slug):
+    if slug not in AREAS:
+        sys.exit(f"unknown area {slug!r}; one of: {', '.join(AREAS)}")
+    return AREAS[slug]
+
+
+def agent_argv(lane, model=None, pm=False):
+    # The PM sits in the area lane; everyone else nests their ticket lane under it.
+    argv = ["env", f"AGENT_BUS_LANE={lane}" if pm else f"AGENT_BUS_LANE_PARENT={lane}", "claude"]
+    return argv + (["--model", model] if model else [])
+
+
+def snapshot():
+    r = sh("agent-bus", "snapshot")
+    return json.loads(r.stdout) if r.returncode == 0 else {}
+
+
+def cmd_list(_):
+    snap = snapshot()
+    rid = next((s["repo_id"] for s in snap.get("seats", []) if s.get("repo") == REPO_NAME), None)
+    lanepms = snap.get("lanepms", {}).get(rid, {})
+    names = {s["addr"]: s["name"] for s in snap.get("seats", [])}
+    for slug, (name, lane) in AREAS.items():
+        sp = find_space(name)
+        under = {l["lane"] for l in snap.get("lanes", []) if l.get("repo") == REPO_NAME
+                 and (lane in (l.get("path") or [l["lane"]]) or l.get("project") == name)} | {lane}
+        seats = [s["name"] for s in snap.get("seats", []) if s.get("lane") in under and s.get("repo") == REPO_NAME]
+        pm = lanepms.get(lane)
+        print(f"{name:14} lane @{lane:14} space {'yes' if sp else 'no ':3}  "
+              f"PM {names.get(pm, pm) if pm else '-':16} seats {len(seats)}")
+
+
+def cmd_up(a):
+    name, lane = area(a.area)
+    sp = find_space(name)
+    if sp:
+        app("space.select", id=sp["id"])
+        print(f"{name}: space already open")
+        return
+    task = (f"/area-pm {name}\n\nYou are the {name} area PM. Your agent-bus lane is "
+            f"`{lane}` (set by AGENT_BUS_LANE); take the lane PM role with "
+            f"`agent-bus role pm --lane {lane}`. Start implementers with "
+            f"`bus-area ticket {a.area} ENG-123 <slug>`, which opens a tab in this "
+            f"Herdr space with the ticket's lane nested under yours, so they report to you.")
+    argv = agent_argv(lane, a.model, pm=True)
+    if a.resume:
+        # A resumed chat knows its job, but ending its last session released its roles.
+        argv = argv + ["--resume", a.resume]
+        task = (f"Setup note, not a new task: you were resumed in Herdr desktop as the {name} PM in lane "
+                f"`{lane}`. Your PM role was released when your last session ended; retake it with "
+                f"`agent-bus role pm --lane {lane}`. Ticket lanes nest under yours (`agent-bus lanes`); start "
+                f"implementers with `bus-area ticket {a.area} ENG-123 <slug>`. Then carry on.")
+    if a.brief:
+        task += f"\n\nFrom the lead: {a.brief}"
+    app("space.new", name=name, folder=REPO, tab="PM", argv=argv, task=task)
+    print(f"{name}: space opened, PM {'resuming' if a.resume else 'starting'} in tab PM (lane @{lane})")
+
+
+def cmd_ticket(a):
+    name, lane = area(a.area)
+    key = a.ticket.upper()
+    if not re.fullmatch(r"[A-Z][A-Z0-9]*-\d+", key):
+        sys.exit("ticket must look like ENG-123")
+    slug = re.sub(r"[^a-z0-9]+", "-", a.slug.lower()).strip("-")
+    branch = f"feature/{key.lower()}-{slug}"
+    path = os.path.join(WORKTREES, branch.replace("/", "-"))
+    if not os.path.isdir(path):
+        sh("git", "-C", REPO, "fetch", "-q", "origin")
+        r = sh("git", "-C", REPO, "worktree", "add", "-b", branch, path, a.base)
+        if r.returncode:
+            r = sh("git", "-C", REPO, "worktree", "add", path, branch)  # branch exists
+        if r.returncode:
+            sys.exit(r.stderr.strip())
+    sp = find_space(name)
+    if not sp:
+        sys.exit(f"{name} has no space yet; run: bus-area up {a.area}")
+    task = (f"/team-implementer {key}\n\nYour lane is the ticket's, nested under the {name} area (`{lane}`); "
+            f"its PM is yours. Report to it with `agent-bus post --to @pm`.")
+    app("tab.new", name=key, space=sp["id"], folder=path, argv=agent_argv(lane, a.model), task=task)
+    print(f"{key}: worktree {path}, tab in {name}, lane @{lane}")
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("list").set_defaults(fn=cmd_list)
+    u = sub.add_parser("up"); u.add_argument("area"); u.add_argument("--model"); u.add_argument("--resume"); u.add_argument("--brief"); u.set_defaults(fn=cmd_up)
+    t = sub.add_parser("ticket"); t.add_argument("area"); t.add_argument("ticket"); t.add_argument("slug")
+    t.add_argument("--base", default="origin/develop"); t.add_argument("--model"); t.set_defaults(fn=cmd_ticket)
+    a = p.parse_args()
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()
