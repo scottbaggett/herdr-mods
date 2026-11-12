@@ -24,7 +24,7 @@ def hc_label(*kv):
 
 
 def clear_labels():
-    hc_label(*[f"agent.{k}=" for k in ("account", "model", "ctx", "5h", "wk", "5h_reset", "wk_reset")])
+    hc_label(*[f"agent.{k}=" for k in ("account", "model", "ctx", "5h", "wk", "5h_reset", "wk_reset", "session", "transcript")])
     for f in (f"labels-{TERM}.json", f"run-{TERM}.json"):
         try:
             os.remove(f"{CACHE}/{f}")

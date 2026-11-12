@@ -84,7 +84,11 @@ def codex_watch(pid, home):
     while alive(pid):
         path = path or codex_session(home, cwd, since)
         if path:
-            set_labels(codex_facts(path))
+            try:
+                sid = json.loads(open(path).readline()).get("payload", {}).get("id")
+            except (OSError, ValueError):
+                sid = None
+            set_labels({**codex_facts(path), "agent.session": sid, "agent.transcript": path})
             # A turn just ended: let agent-shift move this chat if the account is running low.
             done = sum(1 for line in open(path) if '"task_complete"' in line)
             if turns is not None and done > turns:

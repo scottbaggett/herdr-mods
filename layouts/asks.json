@@ -161,6 +161,13 @@
                       "content": {
                         "mod": "mrs"
                       }
+                    },
+                    {
+                      "id": "boards",
+                      "type": "block",
+                      "content": {
+                        "mod": "boards"
+                      }
                     }
                   ],
                   "active": "files"

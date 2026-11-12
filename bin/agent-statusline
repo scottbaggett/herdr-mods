@@ -79,7 +79,8 @@ def main():
     # Inside Herdr the pane header shows all of this, so feed it labels and print nothing.
     if os.environ.get("HC_TERMINAL_ID"):
         labels = {"agent.account": label, "agent.model": model,
-                  "agent.ctx": round(used) if used is not None else None}
+                  "agent.ctx": round(used) if used is not None else None,
+                  "agent.session": s.get("session_id"), "agent.transcript": s.get("transcript_path")}
         for key, short in (("five_hour", "5h"), ("seven_day", "wk")):
             w = live.get(key) or {}
             if w.get("used_percentage") is not None:

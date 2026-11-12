@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""The design boards a chat is working with, for the Boards panel.
+
+  herdr-boards --cwd <dir> [--session <id>] [--transcript <path>]
+
+A board belongs to the chat when (strongest first):
+  chat      its board.json names the chat: "agent": {"session": "<id>"}
+  mentioned the chat's transcript names it (boards/<slug>, --board <slug>, or its review link)
+  ticket    its "context" links the ticket in the chat's branch (e.g. SALT-10045)
+  made here it sits in the chat's own worktree and changed after the chat began
+
+Boards are read from boards/*/board.json in the repo's boards kit, across every git worktree of
+the repo. Config (~/.config/herdr-mods/config.json):
+  "boards": {"path": "repos/salt-boards", "url": "https://boards.salt.ai"}
+Prints JSON: {"boards": [{slug, title, description, url, local, updated, why}], "ticket"}.
+"""
+import argparse, glob, json, os, re, subprocess, uuid
+
+CONFIG = os.path.expanduser(os.environ.get("HERDR_MODS_CONFIG", "~/.config/herdr-mods/config.json"))
+BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+RANK = {"chat": 0, "mentioned": 1, "ticket": 2, "made here": 3}
+
+
+def short_id(board_id):
+    n, d = uuid.UUID(board_id).int, ""
+    while n:
+        n, r = divmod(n, 58)
+        d = BASE58[r] + d
+    return d.rjust(22, BASE58[0])
+
+
+def said(path):
+    """What the chat itself wrote or ran: people's and the agent's words, and tool inputs, not tool output
+    (a listing of boards/ mentions every board)."""
+    out = []
+    with open(path, errors="ignore") as f:
+        for line in f:
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("type") == "response_item":  # Codex
+                p = e.get("payload", {})
+                if p.get("type") == "message":
+                    out += [c.get("text", "") for c in p.get("content", []) if isinstance(c, dict)]
+                elif p.get("type") in ("function_call", "custom_tool_call"):
+                    out.append(str(p.get("arguments") or p.get("input") or ""))
+                continue
+            msg = e.get("message") or {}
+            content = msg.get("content")
+            if isinstance(content, str):
+                out.append(content)
+            elif isinstance(content, list):
+                for c in content:
+                    if c.get("type") == "text":
+                        out.append(c.get("text", ""))
+                    elif c.get("type") == "tool_use":
+                        out.append(json.dumps(c.get("input", {})))
+    return "\n".join(out)
+
+
+def git(cwd, *a):
+    r = subprocess.run(["git", "-C", cwd, *a], capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--cwd", required=True)
+    ap.add_argument("--session")
+    ap.add_argument("--transcript")
+    a = ap.parse_args()
+    try:
+        cfg = json.load(open(CONFIG)).get("boards", {})
+    except (OSError, ValueError):
+        cfg = {}
+    kit, site = cfg.get("path", "repos/salt-boards"), cfg.get("url", "https://boards.salt.ai").rstrip("/")
+
+    top = git(a.cwd, "rev-parse", "--show-toplevel")
+    if not top:
+        return print(json.dumps({"boards": [], "ticket": None}))
+    branch = git(a.cwd, "branch", "--show-current")
+    m = re.search(r"([a-z]+)-(\d+)", branch, re.I)
+    ticket = f"{m.group(1)}-{m.group(2)}".upper() if m else None
+    trees = [l[9:] for l in git(top, "worktree", "list", "--porcelain").splitlines() if l.startswith("worktree ")] or [top]
+
+    text, since = "", 0
+    if a.transcript and os.path.isfile(a.transcript):
+        since = os.stat(a.transcript).st_birthtime if hasattr(os.stat(a.transcript), "st_birthtime") else 0
+        text = said(a.transcript)
+    mentioned = set(re.findall(r"boards/([a-z0-9][a-z0-9-]+)/", text)) | set(re.findall(r"(?:--board[ =]|board:new )([a-z0-9][a-z0-9-]+)", text))
+    links = set(re.findall(re.escape(site) + r"/([1-9A-HJ-NP-Za-km-z]{22})", text))
+
+    found = {}
+    for tree in trees:
+        for meta in glob.glob(os.path.join(tree, kit, "boards", "*", "board.json")):
+            d = os.path.dirname(meta)
+            slug = os.path.basename(d)
+            try:
+                b = json.load(open(meta))
+            except (OSError, ValueError):
+                continue
+            sid = b.get("id") or str(uuid.uuid5(uuid.NAMESPACE_URL, f"plai-app/ai-studio/salt-board-artifacts/{slug}"))
+            short = short_id(sid)
+            updated = max((os.path.getmtime(p) for p in glob.glob(os.path.join(d, "*")) if os.path.isfile(p)), default=0)
+            why = []
+            if a.session and (b.get("agent") or {}).get("session") == a.session:
+                why.append("chat")
+            if slug in mentioned or short in links:
+                why.append("mentioned")
+            if ticket and any((c.get("id") or "").upper() == ticket for c in b.get("context", [])):
+                why.append("ticket")
+            if os.path.realpath(tree) == os.path.realpath(top) and since and updated >= since:
+                why.append("made here")
+            if not why:
+                continue
+            local = os.path.join(tree, kit, "dist", slug, "board.html")
+            prev = found.get(slug)
+            row = {"slug": slug, "title": b.get("title") or slug, "description": (b.get("seo") or {}).get("description"),
+                   "url": f"{site}/{short}", "local": local if os.path.isfile(local) else None,
+                   "updated": updated, "why": sorted(set(why) | set(prev["why"] if prev else []), key=RANK.get)}
+            if not prev or updated > prev["updated"]:
+                found[slug] = row
+            else:
+                prev["why"] = row["why"]
+    rows = sorted(found.values(), key=lambda r: (RANK[r["why"][0]], -r["updated"]))
+    print(json.dumps({"boards": rows, "ticket": ticket}))
+
+
+if __name__ == "__main__":
+    main()
