@@ -71,10 +71,17 @@ def area(slug):
     return AREAS[slug]
 
 
-def agent_argv(lane, model=None, pm=False):
+def agent_argv(lane, model=None, pm=False, folder=None):
     # The PM sits in the area lane; everyone else nests their ticket lane under it.
-    # agent-run keeps the terminal when agent-shift moves the agent to another account.
-    argv = ["env", f"AGENT_BUS_LANE={lane}" if pm else f"AGENT_BUS_LANE_PARENT={lane}", "agent-run", "Claude", "claude"]
+    # It starts on the Claude account with the most room (agent-shift best), under agent-run,
+    # which keeps the terminal when agent-shift later moves it to another account.
+    try:
+        acct = json.loads(sh("agent-shift", "best", "claude", *(["--folder", folder] if folder else [])).stdout)
+    except ValueError:
+        acct = {}
+    argv = ["env"] + [x for k in acct.get("unset", []) for x in ("-u", k)] \
+        + [f"{k}={v}" for k, v in acct.get("env", {}).items()] \
+        + [f"AGENT_BUS_LANE={lane}" if pm else f"AGENT_BUS_LANE_PARENT={lane}", "agent-run", acct.get("label") or "Claude", "claude"]
     return argv + (["--model", model] if model else [])
 
 
@@ -110,7 +117,7 @@ def cmd_up(a):
             f"`agent-bus role pm --lane {lane}`. Start implementers with "
             f"`bus-area ticket {a.area} ENG-123 <slug>`, which opens a tab in this "
             f"Herdr space with the ticket's lane nested under yours, so they report to you.")
-    argv = agent_argv(lane, a.model, pm=True)
+    argv = agent_argv(lane, a.model, pm=True, folder=REPO)
     if a.resume:
         # A resumed chat knows its job, but ending its last session released its roles.
         argv = argv + ["--resume", a.resume]
@@ -149,7 +156,7 @@ def cmd_ticket(a):
         sys.exit(f"{name} has no space yet; run: bus-area up {a.area}")
     task = (f"/team-implementer {key}\n\nYour lane is the ticket's, nested under the {name} area (`{lane}`); "
             f"its PM is yours. Report to it with `agent-bus post --to @pm`.")
-    app("tab.new", name=key, space=sp["id"], folder=path, argv=agent_argv(lane, a.model), task=task)
+    app("tab.new", name=key, space=sp["id"], folder=path, argv=agent_argv(lane, a.model, folder=path), task=task)
     print(f"{key}: worktree {path}, tab in {name}, lane @{lane}")
 
 

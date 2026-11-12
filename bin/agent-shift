@@ -7,6 +7,8 @@
   agent-shift move <terminal> --to <account> ["prompt"] [--force]
                                      move the Claude agent in that terminal now (skips one with running
                                      background work unless --force); the prompt starts its next turn
+  agent-shift best <claude|codex> [--folder <dir>]
+                                     the account a new agent should start on (most room), as JSON
   agent-shift status                 each account's use, where a low agent would go, and recent moves
 
 At the end of a turn, if the account in use is at or above the threshold (default 90%) on its
@@ -344,7 +346,13 @@ def carry_trust(src_dir, dst_dir, folder):
     def store(d):
         return os.path.join(os.path.expanduser(d), ".claude.json") if d else os.path.expanduser("~/.claude.json")
     src, dst = load(store(src_dir), {}), load(store(dst_dir), None)
-    if dst is None or not folder or not src.get("projects", {}).get(folder, {}).get("hasTrustDialogAccepted"):
+    def trusted(f):  # the folder itself, or a parent (how a fresh worktree is trusted)
+        while f and f != "/":
+            if src.get("projects", {}).get(f, {}).get("hasTrustDialogAccepted"):
+                return True
+            f = os.path.dirname(f)
+        return False
+    if dst is None or not folder or not trusted(folder):
         return
     proj = dst.setdefault("projects", {}).setdefault(folder, {})
     if proj.get("hasTrustDialogAccepted"):
@@ -507,6 +515,24 @@ def move(term, to, prompt=None, force=False):
     return f"{term}: {current} → {to} {'ok' if ok else 'DID NOT COME BACK; run: ' + line}"
 
 
+def best(runtime, folder=None):
+    """Where a new agent should start: the account on `runtime` with the most room.
+    Prints {"label", "env": {...}, "unset": [...]} for the launcher."""
+    s = settings()
+    rows = [(u + pending(runtime, l, s), l, a) for l, u, a in accounts(runtime) if u is not None]
+    if not rows:
+        return print(json.dumps({"label": None, "env": {}, "unset": []}))
+    _, label, a = min(rows)
+    if runtime == "claude":
+        cd = a.get("config_dir")
+        carry_trust(None, cd, folder) if cd else None
+        out = {"label": label, "env": {"CLAUDE_CONFIG_DIR": os.path.expanduser(cd)} if cd else {},
+               "unset": [] if cd else ["CLAUDE_CONFIG_DIR"]}
+    else:
+        out = {"label": label, "env": {"CODEX_HOME": os.path.expanduser(a["home"])}, "unset": []}
+    print(json.dumps(out))
+
+
 def status():
     s = settings()
     print(f"threshold {s['threshold']}%  cooldown {s['cooldown_min']}m  {'on' if s['enabled'] else 'OFF'}")
@@ -537,6 +563,8 @@ def main():
     elif a[:1] == ["move"] and len(a) >= 4 and a[2] == "--to":
         rest = a[4:]
         print(move(a[1], a[3], prompt=next((x for x in rest if not x.startswith("--")), None), force="--force" in rest))
+    elif a[:1] == ["best"] and len(a) >= 2:
+        best(a[1], a[3] if a[2:3] == ["--folder"] and len(a) > 3 else None)
     elif a[:1] == ["status"]:
         status()
     else:
