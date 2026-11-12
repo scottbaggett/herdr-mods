@@ -11,8 +11,9 @@ area PM supervises it (needs agent-bus with nested lanes).
   bus-area up <area> [--resume <session-id>] [--brief "<what this PM covers>"]
                                        open the area's space and start its PM
                                        (or resume an earlier PM chat there)
-  bus-area ticket <area> ENG-123 <slug> [--base origin/develop] [--model m]
-                                       worktree + tab + implementer for a ticket
+  bus-area ticket <area> ENG-123 <slug> [--base origin/develop] [--model m] [--runtime opencode]
+                                       worktree + tab + implementer for a ticket (Claude by default;
+                                       --runtime opencode --model openai/gpt-6.1-sol for an OpenCode one)
 """
 import argparse, json, os, re, subprocess, sys
 
@@ -156,8 +157,21 @@ def cmd_ticket(a):
         sys.exit(f"{name} has no space yet; run: bus-area up {a.area}")
     task = (f"/team-implementer {key}\n\nYour lane is the ticket's, nested under the {name} area (`{lane}`); "
             f"its PM is yours. Report to it with `agent-bus post --to @pm`.")
-    app("tab.new", name=key, space=sp["id"], folder=path, argv=agent_argv(lane, a.model, folder=path), task=task)
-    print(f"{key}: worktree {path}, tab in {name}, lane @{lane}")
+    if a.runtime == "opencode":
+        if not a.model:
+            sys.exit("--runtime opencode needs --model, e.g. openai/gpt-6.1-sol (see `opencode models`)")
+        # OpenCode's window takes no model flag, so the first turn runs with `opencode run -m`,
+        # then the same session (which keeps its model) opens in the window.
+        sid = "ses_bus" + os.urandom(12).hex()
+        task = (f"You are the implementer for {key}. First read ~/.claude/skills/team-implementer/SKILL.md and follow it "
+                f"for this ticket. Your agent-bus lane is the ticket's, nested under the {name} area (`{lane}`); its PM "
+                f"is yours. Report to it with `agent-bus post --to @pm`.")
+        argv = ["env", f"AGENT_BUS_LANE_PARENT={lane}", "sh", "-c",
+                'opencode run -m "$1" -s "$2" --auto "$3"; exec opencode -s "$2" --auto', "sh", a.model, sid, task]
+        app("tab.new", name=key, space=sp["id"], folder=path, argv=argv)
+    else:
+        app("tab.new", name=key, space=sp["id"], folder=path, argv=agent_argv(lane, a.model, folder=path), task=task)
+    print(f"{key}: worktree {path}, tab in {name}, lane @{lane}" + (f", {a.runtime} {a.model}" if a.runtime != "claude" else ""))
 
 
 def main():
@@ -166,7 +180,8 @@ def main():
     sub.add_parser("list").set_defaults(fn=cmd_list)
     u = sub.add_parser("up"); u.add_argument("area"); u.add_argument("--model"); u.add_argument("--resume"); u.add_argument("--brief"); u.set_defaults(fn=cmd_up)
     t = sub.add_parser("ticket"); t.add_argument("area"); t.add_argument("ticket"); t.add_argument("slug")
-    t.add_argument("--base", default="origin/develop"); t.add_argument("--model"); t.set_defaults(fn=cmd_ticket)
+    t.add_argument("--base", default="origin/develop"); t.add_argument("--model")
+    t.add_argument("--runtime", choices=["claude", "opencode"], default="claude"); t.set_defaults(fn=cmd_ticket)
     a = p.parse_args()
     a.fn(a)
 
