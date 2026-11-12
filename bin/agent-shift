@@ -15,7 +15,7 @@ runtime is low, it stays and asks the lead on agent-bus. It never moves between 
 Config (~/.config/herdr-mods/config.json): "usage" lists the accounts; optional
 "shift": {"threshold": 90, "cooldown_min": 10, "enabled": true}.
 """
-import json, os, shutil, signal, subprocess, sys, time
+import json, os, shlex, shutil, signal, subprocess, sys, time
 
 CONFIG = os.path.expanduser(os.environ.get("HERDR_MODS_CONFIG", "~/.config/herdr-mods/config.json"))
 CACHE = os.path.expanduser("~/.cache/herdr-mods")
@@ -61,6 +61,8 @@ def accounts(runtime):
 def settings():
     s = {"threshold": 90, "cooldown_min": 10, "enabled": True}
     s.update(cfg().get("shift", {}))
+    if os.environ.get("AGENT_SHIFT_THRESHOLD"):  # for testing on one agent
+        s["threshold"] = float(os.environ["AGENT_SHIFT_THRESHOLD"])
     return s
 
 
@@ -122,31 +124,49 @@ def ancestor(name):
     return None
 
 
-def restart(req, fallback_argv, folder):
-    """Hand the switch to agent-run (same terminal), or reopen as a new tab when not under it."""
+def shell_wrapped():
+    """Herdr starts a tab's program inside the login shell (`... ; exec fish -li`), so the shell
+    takes over the terminal when the agent exits and we can type the resume into it."""
+    try:
+        argv = json.loads(subprocess.run(["hc", "get", TERM], capture_output=True, text=True).stdout).get("argv", [])
+    except ValueError:
+        return False
+    return any("exec $argv[1]" in a for a in argv)
+
+
+def helper(script):
+    """Run `script` in a terminal Herdr owns: Claude ends its hook's processes when it exits."""
+    subprocess.run(["hc", "run", "--bg", "--rm", "--no-parent", "--no-notify", "--name", f"shift-{TERM}",
+                    "--", "sh", "-c", script], capture_output=True, timeout=15, env={k: v for k, v in os.environ.items() if k != "HC_TERMINAL_ID"})
+
+
+def restart(req, line):
+    """Stop the agent and start it again on the new account in the same terminal.
+    Under agent-run: it relaunches from the shift file. Otherwise: type `line` into the shell left behind."""
     pid, wrapped = agent_pid()
+    pid = pid or ancestor(req["runtime"])
+    if not pid:
+        return False
+    if not wrapped and not shell_wrapped():
+        bus("@lead", "question", f"{TERM} is low ({req['reason']}) but can't be restarted in place; run: {line}")
+        return False
     os.makedirs(CACHE, exist_ok=True)
     json.dump({"at": time.time(), "to": req["label"]}, open(f"{CACHE}/shifted-{TERM}.json", "w"))
+    stop = f"sleep 1; kill -TERM {pid} 2>/dev/null"
     if wrapped:
         json.dump(req, open(f"{CACHE}/shift-{TERM}.json", "w"))
-        stop = f"sleep 1; kill -TERM {pid} 2>/dev/null"
+        helper(stop)
     else:
-        pid = pid or ancestor(req["runtime"])
-        if not pid:
-            return False
-        tab = space = None
-        for sp in json.loads(subprocess.run(["herdr-app", "ls"], capture_output=True, text=True).stdout or "{}").get("spaces", []):
-            for t in sp.get("tabs", []):
-                if any(x.get("terminal") == TERM for x in t.get("terminals", [])):
-                    space, tab = sp["id"], t["name"]
-        if not space:
-            return False
-        argv = json.dumps(fallback_argv)
-        stop = (f"sleep 1; kill -TERM {pid} 2>/dev/null; sleep 2; "
-                f"herdr-app do tab.new --space {space} --name {json.dumps(tab)} --folder {json.dumps(folder)} --argv {json.dumps(argv)} >/dev/null; "
-                f"herdr-app do terminal.kill --terminal {TERM} >/dev/null")
-    subprocess.Popen(["sh", "-c", stop], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        helper(f"{stop}; i=0; while kill -0 {pid} 2>/dev/null && [ $i -lt 60 ]; do sleep 0.5; i=$((i+1)); done; "
+               f"sleep 1; hc send {TERM} {shlex.quote(line)}")
     return True
+
+
+def env_line(env, unset, argv):
+    """`env [-u X] A=1 cmd ...` as one shell-quoted line, keeping the agent's bus lane."""
+    keep = {k: os.environ[k] for k in ("AGENT_BUS_LANE", "AGENT_BUS_LANE_PARENT", "AGENT_SHIFT_THRESHOLD") if os.environ.get(k)}
+    parts = ["env"] + [x for k in unset for x in ("-u", k)] + [f"{k}={v}" for k, v in {**keep, **env}.items()] + argv
+    return " ".join(shlex.quote(p) for p in parts)
 
 
 # ---- Claude ---------------------------------------------------------------------------------
@@ -198,9 +218,9 @@ def claude_hook():
            "env": {"CLAUDE_CONFIG_DIR": os.path.expanduser(cd)} if cd else {},
            "unset": [] if cd else ["CLAUDE_CONFIG_DIR"],
            "prompt": "You were moved to another account after a rate limit. Carry on where you left off." if failed else None}
-    argv = ["env"] + ([f"CLAUDE_CONFIG_DIR={os.path.expanduser(cd)}"] if cd else ["-u", "CLAUDE_CONFIG_DIR"]) \
-        + ["agent-run", target["label"], "claude", "--resume", sid]
-    if restart(req, argv, h.get("cwd") or os.getcwd()):
+    line = env_line(req["env"], req["unset"], ["agent-run", target["label"], "claude", "--resume", sid]
+                    + ([req["prompt"]] if req["prompt"] else []))
+    if restart(req, line):
         bus("@here", "fyi", f"{os.environ.get('AGENT_BUS_LANE') or os.environ.get('AGENT_BUS_LANE_PARENT') or 'agent'} "
             f"moved Claude {current} → {target['label']} ({why}).")
 
@@ -228,8 +248,8 @@ def codex_turn(home, rollout):
     shutil.copy2(rollout, dst)
     req = {"runtime": "codex", "label": target["label"], "resume": sid, "reason": why,
            "codex_home": dst_home, "env": {"CODEX_HOME": dst_home}}
-    argv = ["agent-run", "--codex-home", dst_home, target["label"], "env", f"CODEX_HOME={dst_home}", "codex", "resume", sid]
-    if restart(req, argv, os.getcwd()):
+    line = env_line({}, [], ["agent-run", "--codex-home", dst_home, target["label"], "env", f"CODEX_HOME={dst_home}", "codex", "resume", sid])
+    if restart(req, line):
         bus("@here", "fyi", f"Codex agent moved {current} → {target['label']} ({why}).")
 
 
