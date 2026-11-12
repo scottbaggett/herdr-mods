@@ -73,6 +73,8 @@ def main():
     if len(args) < 2:
         sys.exit(__doc__)
     label, (extra_env, cmd) = args[0], split_env(args[1:])
+    if cmd and cmd[0] == "command":  # shell `command x`: run x itself, so its pid is the agent's
+        cmd = cmd[1:]
     if not (TERM and subprocess.run(["sh", "-c", "command -v hc"], capture_output=True).returncode == 0):
         os.execvpe(cmd[0], cmd, {**os.environ, **extra_env})
 

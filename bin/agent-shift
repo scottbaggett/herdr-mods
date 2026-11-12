@@ -144,7 +144,7 @@ def restart(req, line):
     """Stop the agent and start it again on the new account in the same terminal.
     Under agent-run: it relaunches from the shift file. Otherwise: type `line` into the shell left behind."""
     pid, wrapped = agent_pid()
-    pid = pid or ancestor(req["runtime"])
+    pid = ancestor(req["runtime"]) or pid
     if not pid:
         return False
     if not wrapped and not shell_wrapped():
