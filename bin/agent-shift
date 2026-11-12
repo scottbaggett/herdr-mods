@@ -4,7 +4,10 @@
   agent-shift claude-hook            Claude Code Stop / StopFailure hook (reads the hook JSON on stdin)
   agent-shift codex-turn <home> <rollout>
                                      called by agent-meta codex-watch when a Codex turn ends
-  agent-shift status                 each account's use, and where a low agent would go
+  agent-shift move <terminal> --to <account> ["prompt"] [--force]
+                                     move the Claude agent in that terminal now (skips one with running
+                                     background work unless --force); the prompt starts its next turn
+  agent-shift status                 each account's use, where a low agent would go, and recent moves
 
 At the end of a turn, if the account in use is at or above the threshold (default 90%) on its
 5-hour or weekly limit, or the turn failed on a rate limit, the agent moves to the account on the
@@ -114,7 +117,8 @@ def refresh_usage():
         pass
 
 
-def busy(pid):
+def busy(pid, term=None):
+    term = term or TERM
     """Work the switch would kill: this agent's background shell commands and subagents."""
     ps = subprocess.run(["ps", "-axo", "pid=,ppid=,command="], capture_output=True, text=True).stdout
     rows = [l.split(None, 2) for l in ps.splitlines() if len(l.split(None, 2)) == 3]
@@ -138,7 +142,7 @@ def busy(pid):
         for sp in ls.get("spaces", []):
             for t in sp.get("tabs", []):
                 for x in t.get("terminals", []):
-                    if x.get("terminal") == TERM and x.get("sub_agents"):
+                    if x.get("terminal") == term and x.get("sub_agents"):
                         found.append(f"{len(x['sub_agents'])} subagent(s)")
     except (ValueError, OSError, subprocess.TimeoutExpired):
         pass
@@ -291,14 +295,30 @@ def finish(term, pid, label, wrapped, line):
                    capture_output=True)
 
 
+KEEP = {"claude": ({"--dangerously-skip-permissions"}, {"--model", "--permission-mode", "--settings", "--add-dir", "--effort"}),
+        "codex": ({"--yolo", "--full-auto", "--dangerously-bypass-approvals-and-sandbox"},
+                  {"-m", "--model", "-p", "--profile", "-s", "--sandbox", "-a", "--ask-for-approval"})}
+
+
+def flags_of(pid, runtime):
+    """A running agent's launch flags worth carrying over (permission mode, model, ...). Read from `ps`,
+    which doesn't quote, so only known flags are kept: words of the opening prompt must not slip in."""
+    toks = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout.split()
+    plain, valued = KEEP[runtime]
+    out, i = [], 1
+    while i < len(toks):
+        if toks[i] in plain:
+            out.append(toks[i])
+        elif toks[i] in valued and i + 1 < len(toks):
+            out += toks[i:i + 2]
+            i += 1
+        i += 1
+    return out
+
+
 def kept_flags(runtime):
-    """The running agent's own launch flags (permission mode, model, ...), to carry across the switch."""
     pid = ancestor(runtime)
-    if not pid:
-        return []
-    args = shlex.split(subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout)
-    r = subprocess.run(["agent-run", "--flags", runtime, *args[1:]], capture_output=True, text=True)
-    return [l for l in r.stdout.split("\n") if l]
+    return flags_of(pid, runtime) if pid else []
 
 
 def env_line(env, unset, argv):
@@ -412,6 +432,61 @@ def codex_switch(home, rollout, current, target, why):
         bus("@here", "fyi", f"Codex agent moved {current} → {target['label']} ({why}).")
 
 
+def move(term, to, prompt=None, force=False):
+    """Move the Claude agent in terminal `term` to account `to` now, from outside it."""
+    import re
+    t = json.loads(subprocess.run(["hc", "get", term], capture_output=True, text=True).stdout)
+    ps = subprocess.run(["ps", "-axo", "pid=,ppid=,comm="], capture_output=True, text=True).stdout
+    rows = [l.split(None, 2) for l in ps.splitlines() if len(l.split(None, 2)) == 3]
+    todo, pid = [t["pid"]], None
+    while todo and not pid:
+        cur = todo.pop(0)
+        for p, pp, comm in rows:
+            if int(pp) == cur:
+                if os.path.basename(comm) == "claude":
+                    pid = int(p)
+                todo.append(int(p))
+    if not pid:
+        return f"{term}: no Claude agent running there"
+    full = subprocess.run(["ps", "eww", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout
+    env = dict(re.findall(r"\b(AGENT_BUS_LANE|AGENT_BUS_LANE_PARENT|CLAUDE_CONFIG_DIR)=(\S+)", full))
+    accts = cfg().get("usage", {}).get("claude", [])
+    current = next((a["label"] for a in accts if norm(a.get("config_dir")) == norm(env.get("CLAUDE_CONFIG_DIR"))), None)
+    target = next((a for a in accts if a["label"] == to), None)
+    if not target:
+        return f"{term}: no Claude account named {to}"
+    if current == to:
+        return f"{term}: already on {to}"
+    work = busy(pid, term)
+    if work and not force:
+        return f"{term}: left alone, it has running work ({'; '.join(work)[:80]})"
+    root = os.path.expanduser(env.get("CLAUDE_CONFIG_DIR") or "~/.claude")
+    sid = load(f"{root}/sessions/{pid}.json", {}).get("sessionId") or t["labels"].get("agent.session")
+    if not sid:
+        return f"{term}: can't tell which chat it is"
+    keep = flags_of(pid, "claude")
+    cd = target.get("config_dir")
+    why = f"moved by hand from {current}"
+    req = {"runtime": "claude", "label": to, "resume": sid, "reason": why, "prompt": prompt,
+           "env": {"CLAUDE_CONFIG_DIR": os.path.expanduser(cd)} if cd else {}, "unset": [] if cd else ["CLAUDE_CONFIG_DIR"]}
+    lanes = [f"{k}={v}" for k, v in env.items() if k.startswith("AGENT_BUS")]
+    parts = ["env"] + ([] if cd else ["-u", "CLAUDE_CONFIG_DIR"]) + lanes + [f"{k}={v}" for k, v in req["env"].items()] \
+        + ["agent-run", to, "claude", *keep, "--resume", sid] + ([prompt] if prompt else [])
+    line = " ".join(shlex.quote(x) for x in parts)
+    run = load(f"{CACHE}/run-{term}.json", {})
+    wrapped = bool(run)
+    now = time.time()
+    json.dump({"at": now, "to": to, "from": None}, open(f"{CACHE}/shifted-{term}.json", "w"))  # by hand: don't drift back
+    json.dump(moves() + [{"at": now, "runtime": "claude", "from": current, "to": to, "terminal": term,
+                          "who": env.get("AGENT_BUS_LANE") or env.get("AGENT_BUS_LANE_PARENT"), "why": why}],
+              open(f"{CACHE}/moves.json", "w"))
+    if wrapped:
+        json.dump(req, open(f"{CACHE}/shift-{term}.json", "w"))
+    finish(term, pid, to, wrapped, line)
+    ok = load(f"{CACHE}/run-{term}.json", {}).get("label") == to
+    return f"{term}: {current} → {to} {'ok' if ok else 'DID NOT COME BACK; run: ' + line}"
+
+
 def status():
     s = settings()
     print(f"threshold {s['threshold']}%  cooldown {s['cooldown_min']}m  {'on' if s['enabled'] else 'OFF'}")
@@ -439,6 +514,9 @@ def main():
             print(f"agent-shift: {e}", file=sys.stderr)
     elif a[:1] == ["finish"] and len(a) == 6:
         finish(a[1], int(a[2]), a[3], a[4] == "1", a[5])
+    elif a[:1] == ["move"] and len(a) >= 4 and a[2] == "--to":
+        rest = a[4:]
+        print(move(a[1], a[3], prompt=next((x for x in rest if not x.startswith("--")), None), force="--force" in rest))
     elif a[:1] == ["status"]:
         status()
     else:
