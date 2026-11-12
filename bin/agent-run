@@ -1,0 +1,10 @@
+#!/bin/sh
+# agent-run <account label> <command...>: run an agent with its account shown in Herdr.
+# Tags this terminal with agent.account=<label> (the pane-account header shows it), runs the
+# command, and removes the tag when it exits. Outside Herdr it just runs the command.
+label=$1; shift
+if [ -n "$HC_TERMINAL_ID" ] && command -v hc >/dev/null; then
+  hc label "$HC_TERMINAL_ID" "agent.account=$label" >/dev/null 2>&1
+  trap 'hc label "$HC_TERMINAL_ID" agent.account= >/dev/null 2>&1' EXIT INT TERM
+fi
+"$@"

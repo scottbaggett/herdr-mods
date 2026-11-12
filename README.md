@@ -32,6 +32,10 @@ Useful keys (add to `~/.config/herdr-app/keys.json` under `"layout:asks"`): `"cm
 
 Codex has its own; add to `[tui]` in `config.toml`: `status_line = ["model-with-reasoning", "context-remaining", "five-hour-limit", "weekly-limit", "git-branch"]`.
 
+## Account badge on each pane
+
+`mods/pane-account` is the pane header with a badge for the account an agent runs on. Start agents through `bin/agent-run <label> <command>` (e.g. a `codex-work` shell function: `agent-run Work env CODEX_HOME=~/.codex-work codex`); it tags the terminal and the header shows the tag. The `asks` layout uses this header.
+
 ## Config
 
 Everything specific to you lives in `~/.config/herdr-mods/config.json` (or `$HERDR_MODS_CONFIG` for the scripts). It is never committed. See `config.example.json`.

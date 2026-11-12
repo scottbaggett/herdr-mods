@@ -112,7 +112,7 @@
                 "pane": {
                   "header": {
                     "content": {
-                      "mod": "pane"
+                      "mod": "pane-account"
                     },
                     "reveal": "always",
                     "height": 30,
