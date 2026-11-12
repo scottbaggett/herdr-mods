@@ -44,29 +44,47 @@ def split_env(argv):
     return env, argv
 
 
+VALUED = {"claude": {"--model", "--permission-mode", "--settings", "--add-dir", "--effort", "--agent", "--mcp-config",
+                     "--append-system-prompt", "--system-prompt", "--allowedTools", "--disallowedTools",
+                     "--fallback-model"},
+          "codex": {"-m", "--model", "-c", "--config", "-p", "--profile", "-s", "--sandbox", "-a",
+                    "--ask-for-approval", "-C", "--cd"}}
+DROP = {"claude": {"--resume": 1, "-r": 1, "--continue": 0, "-c": 0, "--session-id": 1}, "codex": {}}
+
+
+def flags(args, runtime):
+    """The launch flags worth keeping across a switch: options and their values, not the opening
+    prompt (it would be sent again) and not an earlier resume."""
+    out, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a in DROP[runtime]:
+            i += 1 + DROP[runtime][a]
+        elif a.startswith("-"):
+            n = 2 if a in VALUED[runtime] and "=" not in a and i + 1 < len(args) else 1
+            out += args[i:i + n]
+            i += n
+        else:
+            i += 1  # a positional: the prompt, or codex's `resume <id>`
+    return out
+
+
 def resumed(argv, req):
-    """The same command, resuming chat `req["resume"]`; drops any earlier resume/continue flags."""
-    out, skip = [], False
-    for a in argv:
-        if skip:
-            skip = False
-            continue
-        if a in ("--resume", "-r"):
-            skip = True
-            continue
-        if a in ("--continue", "-c"):
-            continue
-        out.append(a)
-    if req["runtime"] == "codex":
-        i = next((i for i, a in enumerate(out) if os.path.basename(a) == "codex"), 0)
-        if len(out) > i + 1 and out[i + 1] == "resume":
-            del out[i + 1:i + 3]
-        return out[:i + 1] + ["resume", req["resume"]] + ([req["prompt"]] if req.get("prompt") else []) + out[i + 1:]
-    return out + ["--resume", req["resume"]] + ([req["prompt"]] if req.get("prompt") else [])
+    """The same program and flags, resuming chat `req["resume"]`."""
+    rt = req["runtime"]
+    i = next((i for i, a in enumerate(argv) if os.path.basename(a) == rt), 0)
+    head, tail = argv[:i + 1], flags(argv[i + 1:], rt)
+    prompt = [req["prompt"]] if req.get("prompt") else []
+    if rt == "codex":
+        return head + ["resume", req["resume"]] + prompt + tail
+    return head + tail + ["--resume", req["resume"]] + prompt
 
 
 def main():
     args = sys.argv[1:]
+    if args[:1] == ["--flags"]:  # agent-run --flags <runtime> <args...>: print the flags to keep, one per line
+        print("\n".join(flags(args[2:], args[1])))
+        return
     codex_home = None
     if args[:1] == ["--codex-home"]:
         codex_home, args = args[1], args[2:]

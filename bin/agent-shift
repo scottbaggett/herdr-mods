@@ -15,7 +15,7 @@ runtime is low, it stays and asks the lead on agent-bus. It never moves between 
 Config (~/.config/herdr-mods/config.json): "usage" lists the accounts; optional
 "shift": {"threshold": 90, "cooldown_min": 10, "enabled": true}.
 """
-import json, os, shlex, shutil, signal, subprocess, sys, time
+import fcntl, json, os, shlex, shutil, signal, subprocess, sys, time
 
 CONFIG = os.path.expanduser(os.environ.get("HERDR_MODS_CONFIG", "~/.config/herdr-mods/config.json"))
 CACHE = os.path.expanduser("~/.cache/herdr-mods")
@@ -59,7 +59,10 @@ def accounts(runtime):
 
 
 def settings():
-    s = {"threshold": 90, "cooldown_min": 10, "enabled": True}
+    s = {"threshold": 90, "cooldown_min": 10, "enabled": True,
+         "gap_sec": 45,        # at most one switch per runtime in this many seconds
+         "per_agent": 3,       # % of headroom a just-moved agent is assumed to take on its new account
+         "return": True, "return_below": 50}  # go back to the account it came from once that has reset
     s.update(cfg().get("shift", {}))
     if os.environ.get("AGENT_SHIFT_THRESHOLD"):  # for testing on one agent
         s["threshold"] = float(os.environ["AGENT_SHIFT_THRESHOLD"])
@@ -81,11 +84,84 @@ def pick(runtime, current, cur_used, s):
         cur_used = next((u for l, u, _ in accts if l == current), None)
     if cur_used is None or cur_used < T:
         return None, None
-    others = [(u, l, a) for l, u, a in accts if l != current and u is not None and u < T]
+    others = [(u + pending(runtime, l, s), l, a) for l, u, a in accts if l != current and u is not None]
+    others = [o for o in others if o[0] < T]
     if not others:
         return None, f"every {runtime} account is at {T}% or more"
     u, l, a = min(others)
     return a, f"{current} at {round(cur_used)}%, {l} at {round(u)}%"
+
+
+def moves():
+    return [m for m in load(f"{CACHE}/moves.json", []) if time.time() - m["at"] < 86400]
+
+
+def pending(runtime, label, s):
+    """Headroom already spoken for: agents moved onto `label` in the last 5 minutes, before usage shows them."""
+    n = sum(1 for m in moves() if m["runtime"] == runtime and m["to"] == label and time.time() - m["at"] < 300)
+    return n * s["per_agent"]
+
+
+def too_soon(runtime, s):
+    return any(m["runtime"] == runtime and time.time() - m["at"] < s["gap_sec"] for m in moves())
+
+
+def refresh_usage():
+    """Fresh numbers for every account before choosing where to go (the cache can be 5 minutes old)."""
+    try:
+        subprocess.run(["claude-usage"], capture_output=True, timeout=25)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def busy(pid):
+    """Work the switch would kill: this agent's background shell commands and subagents."""
+    ps = subprocess.run(["ps", "-axo", "pid=,ppid=,command="], capture_output=True, text=True).stdout
+    rows = [l.split(None, 2) for l in ps.splitlines() if len(l.split(None, 2)) == 3]
+    kids = {}
+    for p, pp, cmd in rows:
+        kids.setdefault(int(pp), []).append((int(p), cmd))
+    mine, me = set(), os.getpid()
+    while me and me != pid and me not in mine:  # the hook's own chain is not background work
+        mine.add(me)
+        me = next((int(pp) for p, pp, _ in rows if int(p) == me), None)
+    todo, found = [pid], []
+    while todo:
+        for p, cmd in kids.get(todo.pop(), []):
+            if p in mine:
+                continue
+            if "shell-snapshots" in cmd:  # how Claude Code runs a Bash tool command
+                found.append(cmd[-60:])
+            todo.append(p)
+    try:
+        ls = json.loads(subprocess.run(["herdr-app", "ls"], capture_output=True, text=True, timeout=10).stdout)
+        for sp in ls.get("spaces", []):
+            for t in sp.get("tabs", []):
+                for x in t.get("terminals", []):
+                    if x.get("terminal") == TERM and x.get("sub_agents"):
+                        found.append(f"{len(x['sub_agents'])} subagent(s)")
+    except (ValueError, OSError, subprocess.TimeoutExpired):
+        pass
+    return found
+
+
+def decide(runtime, current, cur_used, s, forced=False):
+    """(target, why) for this turn end: leave a low account, or return to the one it came from."""
+    T = s["threshold"]
+    if cur_used is None:
+        cur_used = next((u for l, u, _ in accounts(runtime) if l == current), None)
+    if cur_used is not None and cur_used >= T or forced:
+        refresh_usage()
+        return pick(runtime, current, 100 if forced else cur_used, s)
+    origin = load(f"{CACHE}/shifted-{TERM}.json", {}).get("from")
+    if s["return"] and origin and origin != current and cur_used is not None:
+        u = next((u for l, u, _ in accounts(runtime) if l == origin), None)
+        if u is not None and u < s["return_below"] and u + pending(runtime, origin, s) < cur_used:
+            refresh_usage()
+            row = next(((l, u, a) for l, u, a in accounts(runtime) if l == origin), None)
+            if row and row[1] is not None and row[1] < s["return_below"]:
+                return row[2], f"{origin} has reset ({round(row[1])}%), back from {current} ({round(cur_used)}%)"
+    return None, None
 
 
 def cooling(s):
@@ -134,15 +210,9 @@ def shell_wrapped():
     return any("exec $argv[1]" in a for a in argv)
 
 
-def helper(script):
-    """Run `script` in a terminal Herdr owns: Claude ends its hook's processes when it exits."""
-    subprocess.run(["hc", "run", "--bg", "--rm", "--no-parent", "--no-notify", "--name", f"shift-{TERM}",
-                    "--", "sh", "-c", script], capture_output=True, timeout=15, env={k: v for k, v in os.environ.items() if k != "HC_TERMINAL_ID"})
-
-
-def restart(req, line):
-    """Stop the agent and start it again on the new account in the same terminal.
-    Under agent-run: it relaunches from the shift file. Otherwise: type `line` into the shell left behind."""
+def restart(req, line, current):
+    """Stop the agent and start it again on the new account in the same terminal, then check it came back.
+    Under agent-run: it relaunches from the shift file. Otherwise: `line` is typed into the shell left behind."""
     pid, wrapped = agent_pid()
     pid = ancestor(req["runtime"]) or pid
     if not pid:
@@ -151,15 +221,84 @@ def restart(req, line):
         bus("@lead", "question", f"{TERM} is low ({req['reason']}) but can't be restarted in place; run: {line}")
         return False
     os.makedirs(CACHE, exist_ok=True)
-    json.dump({"at": time.time(), "to": req["label"]}, open(f"{CACHE}/shifted-{TERM}.json", "w"))
-    stop = f"sleep 1; kill -TERM {pid} 2>/dev/null"
+    now = time.time()
+    returning = load(f"{CACHE}/shifted-{TERM}.json", {}).get("from") == req["label"]
+    json.dump({"at": now, "to": req["label"], "from": None if returning else current},
+              open(f"{CACHE}/shifted-{TERM}.json", "w"))
+    json.dump(moves() + [{"at": now, "runtime": req["runtime"], "from": current, "to": req["label"], "terminal": TERM,
+                          "who": os.environ.get("AGENT_BUS_LANE") or os.environ.get("AGENT_BUS_LANE_PARENT"),
+                          "why": req["reason"]}], open(f"{CACHE}/moves.json", "w"))
     if wrapped:
         json.dump(req, open(f"{CACHE}/shift-{TERM}.json", "w"))
-        helper(stop)
-    else:
-        helper(f"{stop}; i=0; while kill -0 {pid} 2>/dev/null && [ $i -lt 60 ]; do sleep 0.5; i=$((i+1)); done; "
-               f"sleep 1; hc send {TERM} {shlex.quote(line)}")
+    # In a terminal Herdr owns: Claude ends its hook's processes when it exits.
+    subprocess.run(["hc", "run", "--bg", "--rm", "--no-parent", "--no-notify", "--name", f"shift-{TERM}", "--",
+                    "agent-shift", "finish", TERM, str(pid), req["label"], "1" if wrapped else "0", line],
+                   capture_output=True, timeout=15, env={k: v for k, v in os.environ.items() if k != "HC_TERMINAL_ID"})
     return True
+
+
+def finish(term, pid, label, wrapped, line):
+    """Runs outside the agent: stop it, bring it back on `label`, and make sure it is really there."""
+    def gone():
+        try:
+            os.kill(pid, 0)
+            return False
+        except OSError:
+            return True
+
+    def back():
+        # agent-run records each launch; a new live pid on the right account means the agent is up.
+        run = load(f"{CACHE}/run-{term}.json", {})
+        if run.get("label") != label or run.get("pid") in (None, pid):
+            return False
+        try:
+            os.kill(run["pid"], 0)
+            return True
+        except OSError:
+            return False
+
+    def wait(test, secs):
+        end = time.time() + secs
+        while time.time() < end:
+            if test():
+                return True
+            time.sleep(0.5)
+        return False
+
+    def type_line():
+        subprocess.run(["hc", "send", term, line], capture_output=True, timeout=30,
+                       env={k: v for k, v in os.environ.items() if k != "HC_TERMINAL_ID"})  # no <hc from> wrapper
+
+    time.sleep(1)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
+    if not wait(gone, 30):
+        os.kill(pid, signal.SIGKILL)
+        wait(gone, 5)
+    time.sleep(1)
+    if not wrapped:
+        type_line()
+    if wait(back, 25):
+        return
+    type_line()  # once more: whatever happened, the tab should now be at a shell
+    if wait(back, 25):
+        return
+    msg = f"{term} did not come back after moving to {label}. In that tab run: {line}"
+    bus("@lead", "blocked", msg)
+    subprocess.run(["osascript", "-e", f'display notification {json.dumps(msg[:200])} with title "agent-shift"'],
+                   capture_output=True)
+
+
+def kept_flags(runtime):
+    """The running agent's own launch flags (permission mode, model, ...), to carry across the switch."""
+    pid = ancestor(runtime)
+    if not pid:
+        return []
+    args = shlex.split(subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout)
+    r = subprocess.run(["agent-run", "--flags", runtime, *args[1:]], capture_output=True, text=True)
+    return [l for l in r.stdout.split("\n") if l]
 
 
 def env_line(env, unset, argv):
@@ -203,10 +342,22 @@ def claude_hook():
     if not current:
         return
     failed = h.get("hook_event_name") == "StopFailure"
-    if cooling(s) and not failed:
+    rate = failed and "rate" in json.dumps(h).lower()
+    if cooling(s) and not rate:
         return
-    else:
-        target, why = pick("claude", current, 100 if failed and "rate" in json.dumps(h).lower() else live_used(), s)
+    with open(f"{CACHE}/shift.lock", "w") as lock:  # one agent decides at a time
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if too_soon("claude", s) and not rate:
+            return  # another agent just moved; this one looks again at its next turn end
+        target, why = decide("claude", current, live_used(), s, forced=rate)
+        if target and not rate:
+            work = busy(ancestor("claude") or agent_pid()[0] or 0)
+            if work:
+                return  # it would be killed; try again when the next turn ends
+        return claude_switch(h, s, current, target, why, failed)
+
+
+def claude_switch(h, s, current, target, why, failed):
     if not target:
         if why:
             ask_lead_once("claude", why)
@@ -218,9 +369,9 @@ def claude_hook():
            "env": {"CLAUDE_CONFIG_DIR": os.path.expanduser(cd)} if cd else {},
            "unset": [] if cd else ["CLAUDE_CONFIG_DIR"],
            "prompt": "You were moved to another account after a rate limit. Carry on where you left off." if failed else None}
-    line = env_line(req["env"], req["unset"], ["agent-run", target["label"], "claude", "--resume", sid]
+    line = env_line(req["env"], req["unset"], ["agent-run", target["label"], "claude", *kept_flags("claude"), "--resume", sid]
                     + ([req["prompt"]] if req["prompt"] else []))
-    if restart(req, line):
+    if restart(req, line, current):
         bus("@here", "fyi", f"{os.environ.get('AGENT_BUS_LANE') or os.environ.get('AGENT_BUS_LANE_PARENT') or 'agent'} "
             f"moved Claude {current} → {target['label']} ({why}).")
 
@@ -235,11 +386,19 @@ def codex_turn(home, rollout):
     current = next((a["label"] for a in cfg().get("usage", {}).get("codex", []) if norm(a.get("home")) == home), None)
     if not current:
         return
-    target, why = pick("codex", current, live_used(), s)
-    if not target:
-        if why:
-            ask_lead_once("codex", why)
-        return
+    with open(f"{CACHE}/shift.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if too_soon("codex", s):
+            return
+        target, why = decide("codex", current, live_used(), s)
+        if not target:
+            if why:
+                ask_lead_once("codex", why)
+            return
+        codex_switch(home, rollout, current, target, why)
+
+
+def codex_switch(home, rollout, current, target, why):
     sid = json.loads(open(rollout).readline()).get("payload", {}).get("id")
     dst_home = os.path.expanduser(target["home"])
     rel = os.path.relpath(rollout, f"{home}/sessions")
@@ -248,8 +407,8 @@ def codex_turn(home, rollout):
     shutil.copy2(rollout, dst)
     req = {"runtime": "codex", "label": target["label"], "resume": sid, "reason": why,
            "codex_home": dst_home, "env": {"CODEX_HOME": dst_home}}
-    line = env_line({}, [], ["agent-run", "--codex-home", dst_home, target["label"], "env", f"CODEX_HOME={dst_home}", "codex", "resume", sid])
-    if restart(req, line):
+    line = env_line({}, [], ["agent-run", "--codex-home", dst_home, target["label"], "env", f"CODEX_HOME={dst_home}", "codex", "resume", sid, *kept_flags("codex")])
+    if restart(req, line, current):
         bus("@here", "fyi", f"Codex agent moved {current} → {target['label']} ({why}).")
 
 
@@ -261,6 +420,9 @@ def status():
         for l, u, _ in accts:
             t, why = pick(rt, l, 100, s)
             print(f"  {rt:6} {l:9} {'?' if u is None else f'{u:.0f}%':>5}   if low → {t['label'] if t else why}")
+    for m in moves()[-8:]:
+        print(f"  {time.strftime('%H:%M', time.localtime(m['at']))}  {m.get('who') or m['terminal']}: "
+              f"{m['runtime']} {m['from']} → {m['to']} ({m['why']})")
 
 
 def main():
@@ -275,6 +437,8 @@ def main():
             codex_turn(a[1], a[2])
         except Exception as e:
             print(f"agent-shift: {e}", file=sys.stderr)
+    elif a[:1] == ["finish"] and len(a) == 6:
+        finish(a[1], int(a[2]), a[3], a[4] == "1", a[5])
     elif a[:1] == ["status"]:
         status()
     else:

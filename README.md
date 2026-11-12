@@ -42,9 +42,17 @@ Setup:
 - Start agents through `bin/agent-run <label> <command…>` (it relaunches the agent after a switch). `bus-area` does this; for your shell, wrap `claude` and `codex` in functions that call it.
 - Claude Code: add `agent-shift claude-hook` as a `Stop` and a `StopFailure` hook in each config dir's `settings.json`.
 - Codex: nothing more; `agent-meta codex-watch` (started by `agent-run --codex-home`) calls it when a turn ends.
-- `agent-shift status` shows each account's use and where a low agent would go. Tune with `"shift": {"threshold": 90, "cooldown_min": 10, "enabled": true}` in the config.
+- `agent-shift status` shows each account's use and where a low agent would go. Tune with `"shift": {"threshold": 90, "cooldown_min": 10, "gap_sec": 45, "per_agent": 3, "return": true, "return_below": 50, "enabled": true}` in the config.
 
-An agent that wasn't started under `agent-run` still moves, but into a new tab in the same space.
+What keeps a switch safe:
+- **It checks the agent came back.** A helper in a Herdr-owned terminal stops the agent, restarts it, and confirms it is running on the new account. If not, it retries once, then posts a `blocked` packet to `@lead` and a desktop notification with the exact resume command.
+- **It never kills running work.** An agent with background shell commands or subagents stays put and is looked at again at its next turn end (a rate-limit failure still moves it).
+- **Agents move one at a time.** At most one switch per runtime every `gap_sec` (45s), and each agent moved in the last 5 minutes counts `per_agent` (3%) against its new account, so a crowd doesn't land on one account.
+- **It uses fresh numbers.** Usage is re-read for every account right before choosing.
+- **It goes back.** Once the account an agent left has reset below `return_below` (50%) and has more room than the one it is on, the agent returns (`"return": false` turns this off).
+- **It keeps the launch flags** (model, permission mode, …) and the bus lane, and drops the opening prompt so it isn't sent again.
+
+An agent that wasn't started under `agent-run` moves the same way: its resume command is typed into the shell Herdr leaves in the tab. `agent-shift status` also lists the last moves.
 
 Herdr doesn't hot-reload a mod folder that is a symlink: after editing one, switch layouts and back (`ctrl-shift-l`).
 
