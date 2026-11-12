@@ -1,24 +1,26 @@
 # herdr-mods
 
-Panels for the [Herdr](https://herdr.dev) desktop app, plus the small scripts they run.
+Panels for the [Herdr](https://herdr.dev) desktop app, the small scripts they run, and the `asks` layout that puts them together: spaces and agents on the left with Claude/Codex usage under them, and Asks, MRs, Files, Changes and Bus as tabs on the right.
 
 | Mod | What you see | Needs |
 |---|---|---|
 | `mrs` | Your open GitLab MRs and GitHub PRs, and MRs waiting on your review. The icon is colored by status: red for conflicts or a failed pipeline, yellow while running, green when approved or ready. Click to open. | `glab` and/or `gh`, signed in |
 | `usage` | Claude and Codex tabs. Each signed-in account's 5-hour and weekly limits, with a tick showing how far through the window you are (pace) and when it resets. | `bin/claude-usage` on PATH |
+| `asks`, `tabs-asks`, `spaces-asks` | An inbox of questions your agents are stuck on, across every space, with a badge on the tab bar. Answer from the panel. `tabs-asks` is the tab bar (with the Asks/MRs/Files/Changes buttons), `spaces-asks` the spaces sidebar with each space's pending asks. | `claude` (optional, for classifying questions) |
 | `bus` | An [agent-bus](https://github.com/scottbaggett/agent-bus) view: each area's PM, its seats and the work waiting on you, with Reply and Close. | `agent-bus`, `bin/bus-area` |
 
 ## Install
 
 ```sh
-git clone <this repo> ~/code/herdr-mods
-for m in mrs usage bus; do ln -s ~/code/herdr-mods/mods/$m ~/.config/herdr-app/mods/$m; done
-ln -s ~/code/herdr-mods/bin/claude-usage ~/code/herdr-mods/bin/bus-area ~/.local/bin/
-mkdir -p ~/.config/herdr-mods && cp config.example.json ~/.config/herdr-mods/config.json   # then edit
-herdr-app check ~/.config/herdr-app/mods/usage
+git clone https://github.com/scottbaggett/herdr-mods ~/code/herdr-mods
+~/code/herdr-mods/install.sh
 ```
 
-Then place each mod in a layout block, for example `{ "id": "usage", "type": "block", "content": { "mod": "usage" }, "size": { "px": 300 } }`.
+`install.sh` links every mod, the scripts (into `~/.local/bin`) and the `asks` layout into Herdr, creates `~/.config/herdr-mods/config.json` from the example if you don't have one, says which tools are missing, checks each mod and switches to the layout. It never overwrites a file of yours. `git pull` updates everything in place; Herdr reloads on save.
+
+Useful keys (add to `~/.config/herdr-app/keys.json` under `"layout:asks"`): `"cmd-shift-a": "tabs-asks.toggle"` opens Asks, and `{"command": "layout.select", "args": {"stack": "panel-body", "child": "bus"}}` opens Bus.
+
+`bin/herdr-asks` is the same inbox as a terminal app; see `docs-herdr-asks.md`. Tests: `python3 -m unittest discover -s tests`.
 
 ## Config
 
