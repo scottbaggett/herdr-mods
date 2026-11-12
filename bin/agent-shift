@@ -338,6 +338,24 @@ def claude_current():
     return None, None
 
 
+def carry_trust(src_dir, dst_dir, folder):
+    """A folder the agent already works in is trusted on the new account too, so the resumed
+    chat doesn't stop at Claude's "trust this folder?" prompt."""
+    def store(d):
+        return os.path.join(os.path.expanduser(d), ".claude.json") if d else os.path.expanduser("~/.claude.json")
+    src, dst = load(store(src_dir), {}), load(store(dst_dir), None)
+    if dst is None or not folder or not src.get("projects", {}).get(folder, {}).get("hasTrustDialogAccepted"):
+        return
+    proj = dst.setdefault("projects", {}).setdefault(folder, {})
+    if proj.get("hasTrustDialogAccepted"):
+        return
+    proj["hasTrustDialogAccepted"] = True
+    tmp = store(dst_dir) + ".agent-shift.tmp"
+    with open(tmp, "w") as f:
+        json.dump(dst, f, indent=2)
+    os.replace(tmp, store(dst_dir))
+
+
 def claude_move(transcript, target):
     """Copy the chat into the target account's folder if it uses a different one."""
     src_root = norm(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude")
@@ -384,6 +402,7 @@ def claude_switch(h, s, current, target, why, failed):
         return
     sid = h.get("session_id")
     claude_move(h.get("transcript_path"), target)
+    carry_trust(os.environ.get("CLAUDE_CONFIG_DIR"), target.get("config_dir"), h.get("cwd"))
     cd = target.get("config_dir")
     req = {"runtime": "claude", "label": target["label"], "resume": sid, "reason": why,
            "env": {"CLAUDE_CONFIG_DIR": os.path.expanduser(cd)} if cd else {},
@@ -465,6 +484,7 @@ def move(term, to, prompt=None, force=False):
     if not sid:
         return f"{term}: can't tell which chat it is"
     keep = flags_of(pid, "claude")
+    carry_trust(env.get("CLAUDE_CONFIG_DIR"), target.get("config_dir"), t.get("cwd"))
     cd = target.get("config_dir")
     why = f"moved by hand from {current}"
     req = {"runtime": "claude", "label": to, "resume": sid, "reason": why, "prompt": prompt,
