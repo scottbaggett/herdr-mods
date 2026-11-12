@@ -90,10 +90,7 @@ def main():
             for k in ACCOUNT_VARS:
                 if env.get(k) is None:
                     env.pop(k, None)
-            try:
-                os.remove(f"{CACHE}/labels-{TERM}.json")
-            except OSError:
-                pass
+            clear_labels()  # facts from the previous account must not linger
             hc_label(f"agent.account={label}")
             p = subprocess.Popen(cmd, env=env, preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
             json.dump({"pid": p.pid, "label": label, "cmd": cmd, "codex_home": codex_home},
