@@ -111,6 +111,13 @@ def codex(label, home):
 
 
 claude_accts, codex_accts = load_config()
-print(json.dumps({"at": int(time.time()),
+out = json.dumps({"at": int(time.time()),
                   "accounts": [account(a["label"], keychain_service(a.get("config_dir"))) for a in claude_accts],
-                  "codex": [codex(a["label"], a.get("home", "~/.codex")) for a in codex_accts]}))
+                  "codex": [codex(a["label"], a.get("home", "~/.codex")) for a in codex_accts]})
+print(out)
+# Cached for agent-statusline, which must not hit the network on every render.
+cache = os.path.expanduser("~/.cache/herdr-mods/usage.json")
+os.makedirs(os.path.dirname(cache), exist_ok=True)
+with open(cache + ".tmp", "w") as f:
+    f.write(out)
+os.replace(cache + ".tmp", cache)

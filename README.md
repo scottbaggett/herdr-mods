@@ -22,6 +22,16 @@ Useful keys (add to `~/.config/herdr-app/keys.json` under `"layout:asks"`): `"cm
 
 `bin/herdr-asks` is the same inbox as a terminal app; see `docs-herdr-asks.md`. Tests: `python3 -m unittest discover -s tests`.
 
+## Status line under each agent
+
+`bin/agent-statusline` puts one line under every Claude Code chat: the account it runs on, its email, the model, context used, and the 5-hour and weekly limits. Each figure is green on pace, yellow ahead of pace, red at 90%. Turn it on in each Claude config dir's `settings.json`:
+
+```json
+{ "statusLine": { "type": "command", "command": "agent-statusline", "padding": 0 } }
+```
+
+Codex has its own; add to `[tui]` in `config.toml`: `status_line = ["model-with-reasoning", "context-remaining", "five-hour-limit", "weekly-limit", "git-branch"]`.
+
 ## Config
 
 Everything specific to you lives in `~/.config/herdr-mods/config.json` (or `$HERDR_MODS_CONFIG` for the scripts). It is never committed. See `config.example.json`.
