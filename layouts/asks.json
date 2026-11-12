@@ -50,20 +50,6 @@
           ]
         },
         {
-          "id": "usage",
-          "type": "block",
-          "content": {
-            "mod": "usage"
-          },
-          "size": {
-            "px": 300
-          },
-          "border": {
-            "width": 1,
-            "color": "border"
-          }
-        },
-        {
           "id": "sidebar-footer",
           "type": "block",
           "content": {
@@ -178,6 +164,20 @@
                     }
                   ],
                   "active": "files"
+                },
+                {
+                  "id": "usage",
+                  "type": "block",
+                  "content": {
+                    "mod": "usage"
+                  },
+                  "size": {
+                    "px": 120
+                  },
+                  "border": {
+                    "width": 1,
+                    "color": "border"
+                  }
                 }
               ],
               "size": {

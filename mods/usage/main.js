@@ -1,4 +1,4 @@
-// Usage: tabs for Claude and Codex; each signed-in account's plan limits (5-hour and weekly),
+// Usage: Claude and Codex together, one compact row per limit; each signed-in account's plan limits (5-hour and weekly),
 // how much is used, a tick for how much of the window has passed (pace), and when it resets.
 // Data: bin/claude-usage (on PATH) (keychain token -> Anthropic usage API), every 5 min.
 import { View, div } from "gpui-kit";
@@ -9,12 +9,11 @@ const WINDOW = { session: 5 * 3600, five_hour: 5 * 3600 }; // everything else is
 const WEEK = 7 * 86400;
 
 const left = (s) => s <= 0 ? "now" : s < 3600 ? `${Math.ceil(s / 60)}m` : s < 86400 ? `${Math.round(s / 3600)}h`
-  : `${Math.floor(s / 86400)}d ${Math.round((s % 86400) / 3600)}h`;
+  : ((h) => `${Math.floor(h / 24)}d ${h % 24}h`)(Math.round(s / 3600));
 
 export default class Usage extends View {
   init(_props, cx) {
     this.data = null; this.err = null;
-    try { this.tab = localStorage.getItem("tab") ?? "claude"; } catch { this.tab = "claude"; }
     this.refresh(cx);
     cx.timer.every(300000, (cx) => this.refresh(cx));
   }
@@ -30,47 +29,43 @@ export default class Usage extends View {
     });
   }
 
-  bar(l, now, t, key) {
+  // A header-style meter: label, short bar with pace tick, percent, reset.
+  meter(l, now, t, key) {
     const end = l.resets_at ? Date.parse(l.resets_at) / 1000 : null;
     const span = l.window ?? WINDOW[l.kind] ?? WEEK;
-    const pace = end ? Math.min(1, Math.max(0, 1 - (end - now) / span)) : null; // share of the window gone
+    const pace = end ? Math.min(1, Math.max(0, 1 - (end - now) / span)) : null;
     const used = Math.min(100, l.percent ?? 0) / 100;
     const color = used >= 0.9 ? t.blocked : pace != null && used > pace + 0.05 ? t.working : t.ansi2;
-    return v_flex().id(key).gap(3)
-      .child(h_flex().justify_between().text_size(11.5)
-        .child(div().text_color(t.muted).child(l.name))
-        .child(h_flex().gap(6)
-          .child(div().text_color(t.foreground).child(`${Math.round(used * 100)}%`))
-          .when(!!end, (el) => el.child(div().text_color(t.dim).child(`resets ${left(end - now)}`)))))
-      .child(div().relative().h(5).w_full().rounded(3).bg(t.raised)
-        .child(div().absolute().left(0).top(0).h(5).rounded(3).bg(color).w(`${used * 100}%`))
-        .when(pace != null, (el) => el.child(div().absolute().top(-2).h(9).w(1.5).bg(t.foreground).left(`${pace * 100}%`))));
+    const name = l.kind === "five_hour" || l.kind === "session" || /^5/.test(l.name) ? "5h" : "wk";
+    return h_flex().id(key).w(name === "5h" ? 104 : 140).flex_none().items_center().gap(4).text_size(11).whitespace_nowrap()
+      .child(div().text_color(t.dim).child(name))
+      .child(div().relative().w(34).h(4).rounded(2).bg(t.raised)
+        .child(div().absolute().left(0).top(0).h(4).rounded(2).bg(color).w(`${used * 100}%`))
+        .when(pace != null, (el) => el.child(div().absolute().top(-2).h(8).w(1).bg(t.muted).left(`${pace * 100}%`))))
+      .child(div().w(28).text_right().text_color(color).child(`${Math.round(used * 100)}%`))
+      .child(div().w(42).flex_none().whitespace_nowrap().text_color(t.dim).child(end && name === "wk" ? left(end - now) : ""));
   }
 
   render(_cx) {
     const t = theme();
     const now = Date.now() / 1000;
-    const tabs = [["claude", "Claude"], ["codex", "Codex"]];
-    const tabBtn = ([id, label]) => div().id(`tab-${id}`).px(8).py(2).rounded(5).text_size(12).cursor_pointer()
-      .bg(this.tab === id ? t.selected : t.chrome).text_color(this.tab === id ? t.foreground : t.muted)
-      .hover((s) => s.bg(t.hover))
-      .on_click((_e, cx) => { this.tab = id; try { localStorage.setItem("tab", id); } catch {} cx.notify(); })
-      .child(label);
-    const root = v_flex().size_full().bg(t.chrome).px(20).pt(10).pb(12).gap(12)
-      .child(h_flex().items_center().gap(4)
-        .child(div().text_size(13).text_color(t.muted).mr(6).child("Usage"))
-        .children(tabs.map(tabBtn)));
+    const root = v_flex().size_full().bg(t.chrome).px(12).py(8).gap(5).justify_center();
     if (this.err) root.child(div().text_size(11).text_color(t.blocked).child(this.err));
-    if (!this.data) return root.child(div().text_size(12).text_color(t.dim).child(this.err ? "" : "Loading…"));
-    for (const a of (this.tab === "codex" ? this.data.codex : this.data.accounts) ?? []) {
-      const col = v_flex().gap(7)
-        .child(h_flex().gap(6).items_center()
-          .child(div().text_size(12.5).font_semibold().text_color(t.foreground).child(a.label))
-          .child(div().text_size(11).text_color(t.dim).child([a.plan, a.email].filter(Boolean).join(" · "))));
-      if (a.error) col.child(div().text_size(11).text_color(t.working).child(a.error));
-      a.limits.forEach((l, i) => col.child(this.bar(l, now, t, `u-${a.label}-${i}`)));
-      if (a.extra) col.child(div().text_size(11).text_color(t.dim).child(`Extra usage $${a.extra.used.toFixed(0)} of $${a.extra.limit.toFixed(0)} this month`));
-      root.child(col);
+    if (!this.data) return root.child(div().text_size(11).text_color(t.dim).child(this.err ? "" : "Loading…"));
+    for (const [id, tool, list] of [["c", "Claude", this.data.accounts], ["x", "Codex", this.data.codex]]) {
+      (list ?? []).forEach((a, i) => {
+        // main limits only: 5-hour and the first weekly (skip per-model weeklies)
+        const five = a.limits.find((l) => /^5|five|session/i.test(l.name + l.kind));
+        const week = a.limits.find((l) => l !== five);
+        const row = h_flex().id(`${id}-${i}`).items_center().gap(8)
+          .child(h_flex().w(96).flex_none().gap(4).text_size(11.5).overflow_hidden().whitespace_nowrap()
+            .child(div().text_color(t.muted).child(tool))
+            .child(div().font_semibold().text_color(t.foreground).child(a.label)));
+        if (a.error) row.child(div().text_size(10.5).text_color(t.working).child(a.error.slice(0, 30)));
+        row.child(five ? this.meter(five, now, t, `${id}-${i}-5`) : div().w(104).flex_none());
+        if (week) row.child(this.meter(week, now, t, `${id}-${i}-w`));
+        root.child(row);
+      });
     }
     return root;
   }
