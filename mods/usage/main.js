@@ -49,7 +49,7 @@ export default class Usage extends View {
   render(_cx) {
     const t = theme();
     const now = Date.now() / 1000;
-    const root = v_flex().size_full().bg(t.chrome).px(12).py(8).gap(5).justify_center();
+    const root = v_flex().size_full().rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).px(14).py(10).gap(5).justify_center();
     if (this.err) root.child(div().text_size(11).text_color(t.blocked).child(this.err));
     if (!this.data) return root.child(div().text_size(11).text_color(t.dim).child(this.err ? "" : "Loading…"));
     for (const [id, tool, list] of [["c", "Claude", this.data.accounts], ["x", "Codex", this.data.codex]]) {

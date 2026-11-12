@@ -172,11 +172,7 @@
                     "mod": "usage"
                   },
                   "size": {
-                    "px": 120
-                  },
-                  "border": {
-                    "width": 1,
-                    "color": "border"
+                    "px": 128
                   }
                 }
               ],
@@ -185,7 +181,8 @@
               },
               "min": 280,
               "max": 900,
-              "hidden": true
+              "hidden": true,
+              "gap": 8
             }
           ],
           "padding": 8,
