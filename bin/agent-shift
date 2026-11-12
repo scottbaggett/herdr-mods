@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""Move an agent to another account on the same runtime when its own runs low, keeping its chat.
+
+  agent-shift claude-hook            Claude Code Stop / StopFailure hook (reads the hook JSON on stdin)
+  agent-shift codex-turn <home> <rollout>
+                                     called by agent-meta codex-watch when a Codex turn ends
+  agent-shift status                 each account's use, and where a low agent would go
+
+At the end of a turn, if the account in use is at or above the threshold (default 90%) on its
+5-hour or weekly limit, or the turn failed on a rate limit, the agent moves to the account on the
+same runtime with the most headroom. Its transcript is copied into that account's folder when the
+two differ, and agent-run restarts it in the same terminal with --resume. If every account on that
+runtime is low, it stays and asks the lead on agent-bus. It never moves between Claude and Codex.
+
+Config (~/.config/herdr-mods/config.json): "usage" lists the accounts; optional
+"shift": {"threshold": 90, "cooldown_min": 10, "enabled": true}.
+"""
+import json, os, shutil, signal, subprocess, sys, time
+
+CONFIG = os.path.expanduser(os.environ.get("HERDR_MODS_CONFIG", "~/.config/herdr-mods/config.json"))
+CACHE = os.path.expanduser("~/.cache/herdr-mods")
+TERM = os.environ.get("HC_TERMINAL_ID")
+
+
+def cfg():
+    try:
+        return json.load(open(CONFIG))
+    except (OSError, ValueError):
+        return {}
+
+
+def norm(p):
+    return os.path.realpath(os.path.expanduser(p)) if p else None
+
+
+def load(path, default=None):
+    try:
+        return json.load(open(path))
+    except (OSError, ValueError):
+        return default
+
+
+def used(limits):
+    """An account's worst main limit, in %: the 5-hour and the all-models weekly ones."""
+    main = [l for l in limits if l.get("kind") not in ("weekly_scoped",)]
+    return max((l.get("percent") or 0 for l in main), default=0)
+
+
+def accounts(runtime):
+    """[(label, used %, account entry)] from the config, with use from the usage cache."""
+    c = cfg().get("usage", {}).get(runtime, [])
+    cache = load(f"{CACHE}/usage.json", {})
+    rows = {a["label"]: a for a in cache.get("accounts" if runtime == "claude" else "codex", [])}
+    out = []
+    for a in c:
+        r = rows.get(a["label"])
+        out.append((a["label"], used(r["limits"]) if r and not r.get("error") else None, a))
+    return out
+
+
+def settings():
+    s = {"threshold": 90, "cooldown_min": 10, "enabled": True}
+    s.update(cfg().get("shift", {}))
+    return s
+
+
+def live_used():
+    """This terminal's own limits, fresher than the cache (from the pane-header labels)."""
+    lab = load(f"{CACHE}/labels-{TERM}.json", {}) if TERM else {}
+    vals = [float(lab[k]) for k in ("agent.5h", "agent.wk") if lab.get(k) not in (None, "")]
+    return max(vals) if vals else None
+
+
+def pick(runtime, current, cur_used, s):
+    """(target entry, reason) or (None, why not)."""
+    T = s["threshold"]
+    accts = accounts(runtime)
+    if cur_used is None:
+        cur_used = next((u for l, u, _ in accts if l == current), None)
+    if cur_used is None or cur_used < T:
+        return None, None
+    others = [(u, l, a) for l, u, a in accts if l != current and u is not None and u < T]
+    if not others:
+        return None, f"every {runtime} account is at {T}% or more"
+    u, l, a = min(others)
+    return a, f"{current} at {round(cur_used)}%, {l} at {round(u)}%"
+
+
+def cooling(s):
+    last = load(f"{CACHE}/shifted-{TERM}.json", {}).get("at", 0)
+    return time.time() - last < s["cooldown_min"] * 60
+
+
+def bus(to, state, msg):
+    subprocess.run(["agent-bus", "post", "--to", to, "--state", state, "-m", msg], capture_output=True, timeout=15)
+
+
+def ask_lead_once(runtime, why):
+    key = f"{CACHE}/asked-{runtime}.json"
+    if time.time() - load(key, {}).get("at", 0) < 3600:
+        return
+    json.dump({"at": time.time()}, open(key, "w"))
+    bus("@lead", "question", f"Agents on {runtime} are running out: {why}. "
+        f"Wait for a reset, or should some move to the other runtime?")
+
+
+def agent_pid():
+    run = load(f"{CACHE}/run-{TERM}.json", {}) if TERM else {}
+    return run.get("pid"), bool(run)
+
+
+def ancestor(name):
+    pid = os.getppid()
+    for _ in range(8):
+        r = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True, text=True)
+        if not r.stdout.strip():
+            return None
+        ppid, comm = r.stdout.strip().split(None, 1)
+        if os.path.basename(comm) == name:
+            return pid
+        pid = int(ppid)
+    return None
+
+
+def restart(req, fallback_argv, folder):
+    """Hand the switch to agent-run (same terminal), or reopen as a new tab when not under it."""
+    pid, wrapped = agent_pid()
+    os.makedirs(CACHE, exist_ok=True)
+    json.dump({"at": time.time(), "to": req["label"]}, open(f"{CACHE}/shifted-{TERM}.json", "w"))
+    if wrapped:
+        json.dump(req, open(f"{CACHE}/shift-{TERM}.json", "w"))
+        stop = f"sleep 1; kill -TERM {pid} 2>/dev/null"
+    else:
+        pid = pid or ancestor(req["runtime"])
+        if not pid:
+            return False
+        tab = space = None
+        for sp in json.loads(subprocess.run(["herdr-app", "ls"], capture_output=True, text=True).stdout or "{}").get("spaces", []):
+            for t in sp.get("tabs", []):
+                if any(x.get("terminal") == TERM for x in t.get("terminals", [])):
+                    space, tab = sp["id"], t["name"]
+        if not space:
+            return False
+        argv = json.dumps(fallback_argv)
+        stop = (f"sleep 1; kill -TERM {pid} 2>/dev/null; sleep 2; "
+                f"herdr-app do tab.new --space {space} --name {json.dumps(tab)} --folder {json.dumps(folder)} --argv {json.dumps(argv)} >/dev/null; "
+                f"herdr-app do terminal.kill --terminal {TERM} >/dev/null")
+    subprocess.Popen(["sh", "-c", stop], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True
+
+
+# ---- Claude ---------------------------------------------------------------------------------
+
+def claude_current():
+    me = norm(os.environ.get("CLAUDE_CONFIG_DIR"))
+    for a in cfg().get("usage", {}).get("claude", []):
+        if norm(a.get("config_dir")) == me:
+            return a["label"], a
+    return None, None
+
+
+def claude_move(transcript, target):
+    """Copy the chat into the target account's folder if it uses a different one."""
+    src_root = norm(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude")
+    dst_root = norm(target.get("config_dir") or "~/.claude")
+    if src_root == dst_root or not transcript:
+        return
+    rel = os.path.relpath(transcript, src_root)
+    dst = os.path.join(dst_root, rel)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copy2(transcript, dst)
+    side = transcript[:-len(".jsonl")]  # subagent transcripts, tool results
+    if os.path.isdir(side):
+        shutil.copytree(side, dst[:-len(".jsonl")], dirs_exist_ok=True)
+
+
+def claude_hook():
+    h = json.load(sys.stdin) if not sys.stdin.isatty() else {}
+    s = settings()
+    if not (TERM and s["enabled"]) or h.get("stop_hook_active"):
+        return
+    current, _ = claude_current()
+    if not current:
+        return
+    failed = h.get("hook_event_name") == "StopFailure"
+    if cooling(s) and not failed:
+        return
+    else:
+        target, why = pick("claude", current, 100 if failed and "rate" in json.dumps(h).lower() else live_used(), s)
+    if not target:
+        if why:
+            ask_lead_once("claude", why)
+        return
+    sid = h.get("session_id")
+    claude_move(h.get("transcript_path"), target)
+    cd = target.get("config_dir")
+    req = {"runtime": "claude", "label": target["label"], "resume": sid, "reason": why,
+           "env": {"CLAUDE_CONFIG_DIR": os.path.expanduser(cd)} if cd else {},
+           "unset": [] if cd else ["CLAUDE_CONFIG_DIR"],
+           "prompt": "You were moved to another account after a rate limit. Carry on where you left off." if failed else None}
+    argv = ["env"] + ([f"CLAUDE_CONFIG_DIR={os.path.expanduser(cd)}"] if cd else ["-u", "CLAUDE_CONFIG_DIR"]) \
+        + ["agent-run", target["label"], "claude", "--resume", sid]
+    if restart(req, argv, h.get("cwd") or os.getcwd()):
+        bus("@here", "fyi", f"{os.environ.get('AGENT_BUS_LANE') or os.environ.get('AGENT_BUS_LANE_PARENT') or 'agent'} "
+            f"moved Claude {current} → {target['label']} ({why}).")
+
+
+# ---- Codex ----------------------------------------------------------------------------------
+
+def codex_turn(home, rollout):
+    s = settings()
+    if not (TERM and s["enabled"]) or cooling(s):
+        return
+    home = norm(home)
+    current = next((a["label"] for a in cfg().get("usage", {}).get("codex", []) if norm(a.get("home")) == home), None)
+    if not current:
+        return
+    target, why = pick("codex", current, live_used(), s)
+    if not target:
+        if why:
+            ask_lead_once("codex", why)
+        return
+    sid = json.loads(open(rollout).readline()).get("payload", {}).get("id")
+    dst_home = os.path.expanduser(target["home"])
+    rel = os.path.relpath(rollout, f"{home}/sessions")
+    dst = os.path.join(dst_home, "sessions", rel)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copy2(rollout, dst)
+    req = {"runtime": "codex", "label": target["label"], "resume": sid, "reason": why,
+           "codex_home": dst_home, "env": {"CODEX_HOME": dst_home}}
+    argv = ["agent-run", "--codex-home", dst_home, target["label"], "env", f"CODEX_HOME={dst_home}", "codex", "resume", sid]
+    if restart(req, argv, os.getcwd()):
+        bus("@here", "fyi", f"Codex agent moved {current} → {target['label']} ({why}).")
+
+
+def status():
+    s = settings()
+    print(f"threshold {s['threshold']}%  cooldown {s['cooldown_min']}m  {'on' if s['enabled'] else 'OFF'}")
+    for rt in ("claude", "codex"):
+        accts = accounts(rt)
+        for l, u, _ in accts:
+            t, why = pick(rt, l, 100, s)
+            print(f"  {rt:6} {l:9} {'?' if u is None else f'{u:.0f}%':>5}   if low → {t['label'] if t else why}")
+
+
+def main():
+    a = sys.argv[1:]
+    if a[:1] == ["claude-hook"]:
+        try:
+            claude_hook()
+        except Exception as e:  # a hook must never break the agent's turn
+            print(f"agent-shift: {e}", file=sys.stderr)
+    elif a[:1] == ["codex-turn"] and len(a) == 3:
+        try:
+            codex_turn(a[1], a[2])
+        except Exception as e:
+            print(f"agent-shift: {e}", file=sys.stderr)
+    elif a[:1] == ["status"]:
+        status()
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main()

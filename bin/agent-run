@@ -1,15 +1,126 @@
-#!/bin/sh
-# agent-run [--codex-home DIR] <account label> <command...>
-# Runs an agent with its account (and, for Codex, its model, context and limits) shown in the
-# Herdr pane header. Tags this terminal with agent.account=<label>, follows a Codex session log
-# when --codex-home is given, and removes the tags when the agent exits. Outside Herdr it just runs.
-codex_home=
-[ "$1" = "--codex-home" ] && { codex_home=$2; shift 2; }
-label=$1; shift
-if [ -n "$HC_TERMINAL_ID" ] && command -v hc >/dev/null; then
-  rm -f "$HOME/.cache/herdr-mods/labels-$HC_TERMINAL_ID.json"
-  hc label "$HC_TERMINAL_ID" "agent.account=$label" >/dev/null 2>&1
-  [ -n "$codex_home" ] && { agent-meta codex-watch $$ "$codex_home" & }
-  trap 'hc label "$HC_TERMINAL_ID" agent.account= agent.model= agent.ctx= agent.5h= agent.wk= agent.5h_reset= agent.wk_reset= >/dev/null 2>&1; rm -f "$HOME/.cache/herdr-mods/labels-$HC_TERMINAL_ID.json"' EXIT INT TERM
-fi
-"$@"
+#!/usr/bin/env python3
+"""agent-run [--codex-home DIR] <account label> <command...>
+
+Runs an agent with its account (and, for Codex, its model, context and limits) shown in the
+Herdr pane header, and keeps the terminal across account switches.
+
+- Tags this terminal with agent.account=<label> and removes the tags when the agent exits.
+- With --codex-home, follows that Codex session log (agent-meta codex-watch).
+- Records the agent's pid in ~/.cache/herdr-mods/run-<terminal>.json, so agent-shift can stop it.
+- When the agent exits and agent-shift has left ~/.cache/herdr-mods/shift-<terminal>.json,
+  it starts the same agent again in this terminal, on the new account, resuming the same chat.
+
+Outside Herdr it just runs the command.
+"""
+import json, os, signal, subprocess, sys
+
+ACCOUNT_VARS = ("CLAUDE_CONFIG_DIR", "CODEX_HOME")
+TERM = os.environ.get("HC_TERMINAL_ID")
+CACHE = os.path.expanduser("~/.cache/herdr-mods")
+
+
+def hc_label(*kv):
+    subprocess.run(["hc", "label", TERM, *kv], capture_output=True, timeout=5)
+
+
+def clear_labels():
+    hc_label(*[f"agent.{k}=" for k in ("account", "model", "ctx", "5h", "wk", "5h_reset", "wk_reset")])
+    for f in (f"labels-{TERM}.json", f"run-{TERM}.json"):
+        try:
+            os.remove(f"{CACHE}/{f}")
+        except OSError:
+            pass
+
+
+def split_env(argv):
+    """`env A=1 B=2 cmd ...` -> ({A:1, B:2}, [cmd ...]) so account variables can be swapped."""
+    env = {}
+    if argv and os.path.basename(argv[0]) == "env":
+        argv = argv[1:]
+        while argv and "=" in argv[0] and not argv[0].startswith("-"):
+            k, v = argv[0].split("=", 1)
+            env[k] = v
+            argv = argv[1:]
+    return env, argv
+
+
+def resumed(argv, req):
+    """The same command, resuming chat `req["resume"]`; drops any earlier resume/continue flags."""
+    out, skip = [], False
+    for a in argv:
+        if skip:
+            skip = False
+            continue
+        if a in ("--resume", "-r"):
+            skip = True
+            continue
+        if a in ("--continue", "-c"):
+            continue
+        out.append(a)
+    if req["runtime"] == "codex":
+        i = next((i for i, a in enumerate(out) if os.path.basename(a) == "codex"), 0)
+        if len(out) > i + 1 and out[i + 1] == "resume":
+            del out[i + 1:i + 3]
+        return out[:i + 1] + ["resume", req["resume"]] + ([req["prompt"]] if req.get("prompt") else []) + out[i + 1:]
+    return out + ["--resume", req["resume"]] + ([req["prompt"]] if req.get("prompt") else [])
+
+
+def main():
+    args = sys.argv[1:]
+    codex_home = None
+    if args[:1] == ["--codex-home"]:
+        codex_home, args = args[1], args[2:]
+    if len(args) < 2:
+        sys.exit(__doc__)
+    label, (extra_env, cmd) = args[0], split_env(args[1:])
+    if not (TERM and subprocess.run(["sh", "-c", "command -v hc"], capture_output=True).returncode == 0):
+        os.execvpe(cmd[0], cmd, {**os.environ, **extra_env})
+
+    signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl-C belongs to the agent
+    os.makedirs(CACHE, exist_ok=True)
+    shift_file = f"{CACHE}/shift-{TERM}.json"
+    code = 0
+    try:
+        while True:
+            env = {**os.environ, **extra_env}
+            if codex_home:
+                env["CODEX_HOME"] = codex_home
+            for k in ACCOUNT_VARS:
+                if env.get(k) is None:
+                    env.pop(k, None)
+            try:
+                os.remove(f"{CACHE}/labels-{TERM}.json")
+            except OSError:
+                pass
+            hc_label(f"agent.account={label}")
+            p = subprocess.Popen(cmd, env=env, preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+            json.dump({"pid": p.pid, "label": label, "cmd": cmd, "codex_home": codex_home},
+                      open(f"{CACHE}/run-{TERM}.json", "w"))
+            watch = None
+            if codex_home:
+                watch = subprocess.Popen(["agent-meta", "codex-watch", str(p.pid), codex_home])
+            code = p.wait()
+            if watch:
+                watch.terminate()
+            try:
+                req = json.load(open(shift_file))
+                os.remove(shift_file)
+            except (OSError, ValueError):
+                break
+            # Switch: new account, same chat, same terminal.
+            label = req["label"]
+            for k in ACCOUNT_VARS:
+                extra_env.pop(k, None)
+            extra_env.update(req.get("env", {}))
+            for k in req.get("unset", []):
+                extra_env[k] = None
+            codex_home = req.get("codex_home")
+            cmd = resumed(cmd, req)
+            print(f"\n\033[2m— moved to {label}: {req.get('reason', '')} —\033[0m\n", flush=True)
+    finally:
+        clear_labels()
+    sys.exit(code)
+
+
+if __name__ == "__main__":
+    main()

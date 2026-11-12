@@ -80,11 +80,16 @@ def codex_facts(path):
 
 
 def codex_watch(pid, home):
-    home, cwd, since, path = os.path.expanduser(home), os.getcwd(), time.time() - 5, None
+    home, cwd, since, path, turns = os.path.expanduser(home), os.getcwd(), time.time() - 5, None, None
     while alive(pid):
         path = path or codex_session(home, cwd, since)
         if path:
             set_labels(codex_facts(path))
+            # A turn just ended: let agent-shift move this chat if the account is running low.
+            done = sum(1 for line in open(path) if '"task_complete"' in line)
+            if turns is not None and done > turns:
+                subprocess.run(["agent-shift", "codex-turn", home, path], timeout=60)
+            turns = done
         time.sleep(5)
 
 

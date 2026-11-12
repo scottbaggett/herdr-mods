@@ -30,6 +30,22 @@ The facts are labels on the agent's Herdr terminal (`agent.account`, `agent.mode
 - **Claude Code:** `bin/agent-statusline` as its status line (`{"statusLine": {"type": "command", "command": "agent-statusline", "padding": 0}}` in each config dir's `settings.json`). Inside Herdr it prints nothing and feeds the header; outside Herdr it prints the same facts as a line. `AGENT_STATUSLINE_SHOW=1` prints it in Herdr too.
 - **Codex:** start it through `bin/agent-run --codex-home <CODEX_HOME> <label> codex …` (for example a `codex-work` shell function). It tags the account and follows that session's log for model, context and limits.
 
+## Switching accounts automatically
+
+With two accounts on a runtime (say Claude Work and Personal), `bin/agent-shift` moves an agent to the other one when its own runs low, keeping the whole chat:
+
+- At the end of each turn, if the account in use is at 90% or more of its 5-hour or weekly limit (or the turn failed on a rate limit), the agent moves to the account on the same runtime with the most headroom.
+- Its transcript is copied into that account's folder when the two use different ones, and it restarts in the same terminal with `--resume`. Its tab, bus seat and memory stay; the header badge changes, and a note goes on the bus.
+- If every account on that runtime is low, it stays put and asks `@lead` on agent-bus (once an hour). It never moves between Claude and Codex.
+
+Setup:
+- Start agents through `bin/agent-run <label> <command…>` (it relaunches the agent after a switch). `bus-area` does this; for your shell, wrap `claude` and `codex` in functions that call it.
+- Claude Code: add `agent-shift claude-hook` as a `Stop` and a `StopFailure` hook in each config dir's `settings.json`.
+- Codex: nothing more; `agent-meta codex-watch` (started by `agent-run --codex-home`) calls it when a turn ends.
+- `agent-shift status` shows each account's use and where a low agent would go. Tune with `"shift": {"threshold": 90, "cooldown_min": 10, "enabled": true}` in the config.
+
+An agent that wasn't started under `agent-run` still moves, but into a new tab in the same space.
+
 Herdr doesn't hot-reload a mod folder that is a symlink: after editing one, switch layouts and back (`ctrl-shift-l`).
 
 ## Config

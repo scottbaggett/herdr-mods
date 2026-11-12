@@ -73,7 +73,8 @@ def area(slug):
 
 def agent_argv(lane, model=None, pm=False):
     # The PM sits in the area lane; everyone else nests their ticket lane under it.
-    argv = ["env", f"AGENT_BUS_LANE={lane}" if pm else f"AGENT_BUS_LANE_PARENT={lane}", "claude"]
+    # agent-run keeps the terminal when agent-shift moves the agent to another account.
+    argv = ["env", f"AGENT_BUS_LANE={lane}" if pm else f"AGENT_BUS_LANE_PARENT={lane}", "agent-run", "Claude", "claude"]
     return argv + (["--model", model] if model else [])
 
 
