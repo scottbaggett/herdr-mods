@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Put an agent's live facts on its Herdr terminal as labels, for the pane-account header.
+
+  agent-meta set k=v ...                 set labels on this terminal ($HC_TERMINAL_ID), only if changed
+  agent-meta codex-watch <pid> <home>    while <pid> lives, follow the Codex session log started in
+                                         this folder under <home>/sessions and label its model,
+                                         context and limits
+
+Labels: agent.account, agent.model, agent.ctx (% used), agent.5h / agent.wk (% used) and
+agent.5h_reset / agent.wk_reset (epoch seconds). Claude's come from bin/agent-statusline.
+"""
+import glob, json, os, subprocess, sys, time
+
+TERM = os.environ.get("HC_TERMINAL_ID")
+STATE = os.path.expanduser(f"~/.cache/herdr-mods/labels-{TERM}.json")
+
+
+def set_labels(labels):
+    """Write only what changed: Claude calls this on every status-line render."""
+    if not TERM:
+        return
+    try:
+        last = json.load(open(STATE))
+    except (OSError, ValueError):
+        last = {}
+    changed = {k: str(v) for k, v in labels.items() if v is not None and last.get(k) != str(v)}
+    if not changed:
+        return
+    subprocess.run(["hc", "label", TERM, *[f"{k}={v}" for k, v in changed.items()]], capture_output=True, timeout=5)
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    with open(STATE, "w") as f:
+        json.dump({**last, **changed}, f)
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def codex_session(home, cwd, since):
+    """The newest session log under <home>/sessions begun after `since` in folder `cwd`."""
+    for f in sorted(glob.glob(f"{home}/sessions/*/*/*/rollout-*.jsonl"), key=os.path.getmtime, reverse=True):
+        if os.path.getmtime(f) < since:
+            break
+        try:
+            meta = json.loads(open(f).readline()).get("payload", {})
+        except (OSError, ValueError):
+            continue
+        if meta.get("cwd") == cwd:
+            return f
+    return None
+
+
+def codex_facts(path):
+    facts, model = {}, None
+    with open(path) as f:
+        for line in f:
+            if '"turn_context"' in line:
+                try: model = json.loads(line)["payload"].get("model")
+                except (ValueError, KeyError): pass
+            elif '"token_count"' in line:
+                try: p = json.loads(line)["payload"]
+                except (ValueError, KeyError): continue
+                info, rl = p.get("info") or {}, p.get("rate_limits") or {}
+                last, win = info.get("last_token_usage") or {}, info.get("model_context_window")
+                if win and last:
+                    facts["agent.ctx"] = round(100 * last.get("input_tokens", 0) / win)
+                for key in ("primary", "secondary"):
+                    w = rl.get(key)
+                    if not w: continue
+                    short = "5h" if w.get("window_minutes", 0) <= 300 else "wk"
+                    facts[f"agent.{short}"] = round(w.get("used_percent", 0))
+                    if w.get("resets_at"): facts[f"agent.{short}_reset"] = int(w["resets_at"])
+    if model:
+        facts["agent.model"] = model
+    return facts
+
+
+def codex_watch(pid, home):
+    home, cwd, since, path = os.path.expanduser(home), os.getcwd(), time.time() - 5, None
+    while alive(pid):
+        path = path or codex_session(home, cwd, since)
+        if path:
+            set_labels(codex_facts(path))
+        time.sleep(5)
+
+
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "set":
+        set_labels(dict(a.split("=", 1) for a in sys.argv[2:]))
+    elif cmd == "codex-watch":
+        codex_watch(int(sys.argv[2]), sys.argv[3])
+    else:
+        sys.exit(__doc__)

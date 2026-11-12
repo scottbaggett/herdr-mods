@@ -1,10 +1,15 @@
 #!/bin/sh
-# agent-run <account label> <command...>: run an agent with its account shown in Herdr.
-# Tags this terminal with agent.account=<label> (the pane-account header shows it), runs the
-# command, and removes the tag when it exits. Outside Herdr it just runs the command.
+# agent-run [--codex-home DIR] <account label> <command...>
+# Runs an agent with its account (and, for Codex, its model, context and limits) shown in the
+# Herdr pane header. Tags this terminal with agent.account=<label>, follows a Codex session log
+# when --codex-home is given, and removes the tags when the agent exits. Outside Herdr it just runs.
+codex_home=
+[ "$1" = "--codex-home" ] && { codex_home=$2; shift 2; }
 label=$1; shift
 if [ -n "$HC_TERMINAL_ID" ] && command -v hc >/dev/null; then
+  rm -f "$HOME/.cache/herdr-mods/labels-$HC_TERMINAL_ID.json"
   hc label "$HC_TERMINAL_ID" "agent.account=$label" >/dev/null 2>&1
-  trap 'hc label "$HC_TERMINAL_ID" agent.account= >/dev/null 2>&1' EXIT INT TERM
+  [ -n "$codex_home" ] && { agent-meta codex-watch $$ "$codex_home" & }
+  trap 'hc label "$HC_TERMINAL_ID" agent.account= agent.model= agent.ctx= agent.5h= agent.wk= agent.5h_reset= agent.wk_reset= >/dev/null 2>&1; rm -f "$HOME/.cache/herdr-mods/labels-$HC_TERMINAL_ID.json"' EXIT INT TERM
 fi
 "$@"

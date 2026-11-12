@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Claude Code status line: which account this session is on, context used, and plan limits.
+"""Claude Code status line, and the feed for the Herdr pane header: which account this session is on, context used, and plan limits.
 
 Set in Claude Code settings: {"statusLine": {"type": "command", "command": "agent-statusline"}}.
 Account: matched by CLAUDE_CONFIG_DIR against the "usage.claude" entries in
 ~/.config/herdr-mods/config.json. Context and limits: from Claude Code's own status input; the account's email
 from the cache `claude-usage` writes. This script never calls the network.
 """
-import json, os, sys, time
+import json, os, subprocess, sys, time
 
 CONFIG = os.path.expanduser(os.environ.get("HERDR_MODS_CONFIG", "~/.config/herdr-mods/config.json"))
 CACHE = os.path.expanduser("~/.cache/herdr-mods/usage.json")
@@ -76,6 +76,18 @@ def main():
                 span = 5 * 3600 if short == "5h" else 7 * 86400
                 pace = 100 * max(0, min(1, 1 - (end - now) / span))
             parts.append(f"{short} {color(l['percent'], pace)}")
+    # Inside Herdr the pane header shows all of this, so feed it labels and print nothing.
+    if os.environ.get("HC_TERMINAL_ID"):
+        labels = {"agent.account": label, "agent.model": model,
+                  "agent.ctx": round(used) if used is not None else None}
+        for key, short in (("five_hour", "5h"), ("seven_day", "wk")):
+            w = live.get(key) or {}
+            if w.get("used_percentage") is not None:
+                labels[f"agent.{short}"] = round(w["used_percentage"])
+                labels[f"agent.{short}_reset"] = w.get("resets_at")
+        subprocess.run(["agent-meta", "set", *[f"{k}={v}" for k, v in labels.items() if v is not None]], timeout=5)
+        if not os.environ.get("AGENT_STATUSLINE_SHOW"):
+            return
     print(f" {DIM}│{RESET} ".join(parts))
 
 

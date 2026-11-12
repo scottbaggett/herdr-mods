@@ -22,19 +22,15 @@ Useful keys (add to `~/.config/herdr-app/keys.json` under `"layout:asks"`): `"cm
 
 `bin/herdr-asks` is the same inbox as a terminal app; see `docs-herdr-asks.md`. Tests: `python3 -m unittest discover -s tests`.
 
-## Status line under each agent
+## Agent facts in each pane header
 
-`bin/agent-statusline` puts one line under every Claude Code chat: the account it runs on, its email, the model, context used, and the 5-hour and weekly limits. Each figure is green on pace, yellow ahead of pace, red at 90%. Turn it on in each Claude config dir's `settings.json`:
+`mods/pane-account` is the pane header with everything about the agent at a glance: the account it runs on (badge), the model, context used, and the 5-hour and weekly limits as small bars with % and time to reset. Green is on pace, yellow ahead of pace, red at 90%.
 
-```json
-{ "statusLine": { "type": "command", "command": "agent-statusline", "padding": 0 } }
-```
+The facts are labels on the agent's Herdr terminal (`agent.account`, `agent.model`, `agent.ctx`, `agent.5h`, `agent.wk`, …), written by:
+- **Claude Code:** `bin/agent-statusline` as its status line (`{"statusLine": {"type": "command", "command": "agent-statusline", "padding": 0}}` in each config dir's `settings.json`). Inside Herdr it prints nothing and feeds the header; outside Herdr it prints the same facts as a line. `AGENT_STATUSLINE_SHOW=1` prints it in Herdr too.
+- **Codex:** start it through `bin/agent-run --codex-home <CODEX_HOME> <label> codex …` (for example a `codex-work` shell function). It tags the account and follows that session's log for model, context and limits.
 
-Codex has its own; add to `[tui]` in `config.toml`: `status_line = ["model-with-reasoning", "context-remaining", "five-hour-limit", "weekly-limit", "git-branch"]`.
-
-## Account badge on each pane
-
-`mods/pane-account` is the pane header with a badge for the account an agent runs on. Start agents through `bin/agent-run <label> <command>` (e.g. a `codex-work` shell function: `agent-run Work env CODEX_HOME=~/.codex-work codex`); it tags the terminal and the header shows the tag. The `asks` layout uses this header.
+Herdr doesn't hot-reload a mod folder that is a symlink: after editing one, switch layouts and back (`ctrl-shift-l`).
 
 ## Config
 
