@@ -7,7 +7,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { panes, props, run, theme, home, layout, terminals } from "herdr";
+import { panes, props, run, theme, home, layout, terminals, exec, openOverlay, readTextFile } from "herdr";
 
 // Match the first visible tab frame, including the active child of a stack.
 function paneFrame(node) {
@@ -36,8 +36,44 @@ function folder(cwd) {
   return cwd === h ? "~" : cwd.startsWith(h + "/") ? "~" + cwd.slice(h.length) : cwd;
 }
 
+// "Open in" choices, found once and shared by every header: Finder, the known editors and
+// terminals that are installed, anything in config "open_in", the repo's web page, copy path.
+const KNOWN = ["Zed", "Cursor", "Visual Studio Code", "Windsurf", "Xcode", "Sublime Text", "Nova", "Ghostty", "iTerm", "Warp", "Fork", "Tower"];
+let openItems = null;
+async function findOpenItems() {
+  const h = home();
+  const ls = await exec("sh", ["-c", 'ls /Applications "$HOME/Applications" 2>/dev/null']);
+  const have = new Set(ls.stdout.split("\n").map((l) => l.replace(/\.app$/, "")));
+  let extra = [];
+  try { extra = JSON.parse(await readTextFile(`${h}/.config/herdr-mods/config.json`) ?? "{}").open_in ?? []; } catch {}
+  const named = new Set(extra.map((e) => e.name));
+  return [{ name: "Finder", app: "Finder" },
+    ...KNOWN.filter((a) => have.has(a) && !named.has(a)).map((a) => ({ name: a === "Visual Studio Code" ? "VS Code" : a, app: a })),
+    ...extra,
+    { name: "Repo on the web", web: true, sep: true }, { name: "Copy path", copy: true }];
+}
+
 export default class Pane extends View {
-  init() { this.hovered = false; }
+  init(_props, cx) {
+    this.hovered = false;
+    openItems ??= findOpenItems();
+    cx.spawn(async (cx) => { this.items = await openItems; cx.notify(); });
+  }
+
+  // The folder, as a button: click for the "Open in" menu (a popup at the pointer).
+  openIn(t, p) {
+    const items = this.items ?? [];
+    return h_flex().id(`ph-open-${p.pane}`).min_w(0).gap(5).items_center().cursor_pointer()
+      .text_color(t.dim).hover((s) => s.text_color(t.foreground))
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        if (!p.cwd || !items.length) return;
+        openOverlay({ mod: "open-in", kind: "popup", width: 200, height: 40 + items.length * 26 + (items.some((i) => i.sep) ? 4 : 0),
+          props: { dir: p.cwd, items } });
+      })
+      .child(div().min_w(0).truncate().child(folder(p.cwd)))
+      .child(svg("mods/pane-account/open.svg").size(12).flex_none());
+  }
 
   me() {
     return panes().find((p) => p.pane === props()?.pane);
@@ -108,7 +144,8 @@ export default class Pane extends View {
         .bg((account === "Work" ? t.accent : t.done) + "26").text_size(10.5).font_semibold()
         .text_color(account === "Work" ? t.accent : t.done).child(account)))
       .when(Boolean(L["agent.model"]), (el) => el.child(div().flex_none().truncate().max_w(140).text_color(t.muted).child(L["agent.model"])))
-      .child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(folder(p.cwd)))
+      .child(this.openIn(t, p))
+      .child(div().flex_1())
       .when(facts.length > 0 && !this.hovered, (el) => el.child(h_flex().flex_none().gap(12).items_center().children(facts)))
       .when(st === "working", el => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
       .when(st === "blocked", el => el.child(div().flex_none().px(6).h(18).flex().items_center().rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).child("Needs you")))

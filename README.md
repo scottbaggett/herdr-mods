@@ -26,6 +26,8 @@ Useful keys (add to `~/.config/herdr-app/keys.json` under `"layout:asks"`): `"cm
 
 `mods/pane-account` is the pane header with everything about the agent at a glance: the account it runs on (badge), the model, context used, and the 5-hour and weekly limits as small bars with % and time to reset. Green is on pace, yellow ahead of pace, red at 90%.
 
+The folder in the header is a button: click it for an **Open in** menu (`mods/open-in`) with Finder, whichever of Zed, Cursor, VS Code, Windsurf, Xcode, Sublime Text, Nova, Ghostty, iTerm, Warp, Fork and Tower are installed, the repo's web page (on the pane's branch), and copy path. Add your own with `"open_in": [{"name": "Tower", "cmd": ["gittower", "{dir}"]}]` in the config (`{"name", "app"}` for a macOS app by name).
+
 The facts are labels on the agent's Herdr terminal (`agent.account`, `agent.model`, `agent.ctx`, `agent.5h`, `agent.wk`, …), written by:
 - **Claude Code:** `bin/agent-statusline` as its status line (`{"statusLine": {"type": "command", "command": "agent-statusline", "padding": 0}}` in each config dir's `settings.json`). Inside Herdr it prints nothing and feeds the header; outside Herdr it prints the same facts as a line. `AGENT_STATUSLINE_SHOW=1` prints it in Herdr too.
 - **Codex:** start it through `bin/agent-run --codex-home <CODEX_HOME> <label> codex …` (for example a `codex-work` shell function). It tags the account and follows that session's log for model, context and limits.
