@@ -6,12 +6,13 @@
 A board belongs to the chat when (strongest first):
   chat      its board.json names the chat: "agent": {"session": "<id>"}
   mentioned the chat's transcript names it (boards/<slug>, --board <slug>, or its review link)
-  ticket    its "context" links the ticket in the chat's branch (e.g. SALT-10045)
+  ticket    its "context" links the ticket in the chat's branch (e.g. ABC-123)
   made here it sits in the chat's own worktree and changed after the chat began
 
 Boards are read from boards/*/board.json in the repo's boards kit, across every git worktree of
 the repo. Config (~/.config/herdr-mods/config.json):
-  "boards": {"path": "repos/salt-boards", "url": "https://boards.salt.ai"}
+  "boards": {"path": "boards-kit", "url": "https://boards.example.com", "id_namespace": "acme/board-artifacts"}
+"id_namespace" seeds the id of a board whose board.json has none; it must match what the boards site uses.
 Prints JSON: {"boards": [{slug, title, description, url, local, updated, why}], "ticket"}.
 """
 import argparse, glob, json, os, re, subprocess, uuid
@@ -74,7 +75,8 @@ def main():
         cfg = json.load(open(CONFIG)).get("boards", {})
     except (OSError, ValueError):
         cfg = {}
-    kit, site = cfg.get("path", "repos/salt-boards"), cfg.get("url", "https://boards.salt.ai").rstrip("/")
+    kit, site = cfg.get("path", "boards-kit"), cfg.get("url", "https://boards.example.com").rstrip("/")
+    namespace = cfg.get("id_namespace", "boards")
 
     top = git(a.cwd, "rev-parse", "--show-toplevel")
     if not top:
@@ -100,7 +102,7 @@ def main():
                 b = json.load(open(meta))
             except (OSError, ValueError):
                 continue
-            sid = b.get("id") or str(uuid.uuid5(uuid.NAMESPACE_URL, f"plai-app/ai-studio/salt-board-artifacts/{slug}"))
+            sid = b.get("id") or str(uuid.uuid5(uuid.NAMESPACE_URL, f"{namespace}/{slug}"))
             short = short_id(sid)
             updated = max((os.path.getmtime(p) for p in glob.glob(os.path.join(d, "*")) if os.path.isfile(p)), default=0)
             why = []

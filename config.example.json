@@ -55,5 +55,10 @@
         "{dir}"
       ]
     }
-  ]
+  ],
+  "boards": {
+    "path": "boards-kit",
+    "url": "https://boards.example.com",
+    "id_namespace": "acme/board-artifacts"
+  }
 }

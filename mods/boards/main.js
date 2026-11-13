@@ -1,4 +1,4 @@
-// Boards: the Salt design boards the focused chat is working with. A board shows when its board.json
+// Boards: the design boards the focused chat is working with. A board shows when its board.json
 // names the chat (agent.session), the chat mentions it, it is linked to the chat's ticket, or it was
 // made in the chat's worktree since the chat began. Click opens its review link; "local" opens the build.
 // Data: bin/herdr-boards, for the focused terminal (its cwd and agent.session / agent.transcript labels).
