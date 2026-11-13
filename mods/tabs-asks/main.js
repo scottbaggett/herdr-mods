@@ -102,7 +102,7 @@ export default class Tabs extends View {
       ? Math.max(10, (root.traffic_lights[0] + 64) / settings().zoom - (sidebar?.hidden ? 0 : sidebar?.size?.px ?? 0))
       : 10;
     const panel = find(root, "panel"), body = find(root, "panel-body");
-    const enabled = [...(shared("workspace.panels") ?? ["files", "changes"]), "asks", "mrs", "boards"];
+    const enabled = [...(shared("workspace.panels") ?? ["files", "changes"]), "asks", "mrs", "boards", "bus"];
     this.syncPanel(space, panel, body, enabled);
     const panelButton = (id, label, icon, badge) => {
       const on = panel && !panel.hidden && body?.active === id;
@@ -129,6 +129,7 @@ export default class Tabs extends View {
       .child(panelButton("asks", this.engine.config?.label ?? "Asks", "mods/tabs-asks/asks.svg", badge))
       .child(panelButton("mrs", "MRs", "mods/mrs/merge.svg"))
       .child(panelButton("boards", "Boards", "mods/boards/board.svg"))
+      .child(panelButton("bus", "Team", "mods/bus/team.svg"))
       .when(enabled.includes("files"), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
       .when(enabled.includes("changes"), el => el.child(panelButton("changes", "Changes", "mods/changes/changes.svg")))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
