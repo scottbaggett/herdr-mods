@@ -23,7 +23,7 @@ export default class Boards extends View {
     if (!f?.terminal) return;
     const term = terminals().find((x) => x.address === f.terminal);
     const L = term?.labels ?? {};
-    const target = { terminal: f.terminal, cwd: f.cwd, session: L["agent.session"], transcript: L["agent.transcript"] };
+    const target = { terminal: f.terminal, cwd: L["agent.cwd"] || f.cwd, session: L["agent.session"], transcript: L["agent.transcript"] };
     const key = JSON.stringify(target);
     if (key === this.key) return;
     this.key = key; this.target = target; this.data = null;

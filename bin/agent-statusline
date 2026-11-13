@@ -89,7 +89,8 @@ def main():
             else:  # this account has no such limit: clear one left from another account
                 labels[f"agent.{short}"] = ""
                 labels[f"agent.{short}_reset"] = ""
-        subprocess.run(["agent-meta", "set", *[f"{k}={v}" for k, v in labels.items() if v is not None]], timeout=5)
+        subprocess.run(["agent-meta", "set", *[f"{k}={v}" for k, v in labels.items() if v is not None],
+                        *([f"--workdir-from={s['transcript_path']}"] if s.get("transcript_path") else [])], timeout=5)
         if not os.environ.get("AGENT_STATUSLINE_SHOW"):
             return
     print(f" {DIM}│{RESET} ".join(parts))

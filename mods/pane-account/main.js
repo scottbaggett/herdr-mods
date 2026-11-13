@@ -61,17 +61,17 @@ export default class Pane extends View {
   }
 
   // The folder, as a button: click for the "Open in" menu (a popup at the pointer).
-  openIn(t, p) {
+  openIn(t, p, dir) {
     const items = this.items ?? [];
     return h_flex().id(`ph-open-${p.pane}`).min_w(0).gap(5).items_center().cursor_pointer()
       .text_color(t.dim).hover((s) => s.text_color(t.foreground))
       .on_click((_e, cx) => {
         cx.stop_propagation();
-        if (!p.cwd || !items.length) return;
+        if (!dir || !items.length) return;
         openOverlay({ mod: "open-in", kind: "popup", width: 200, height: 40 + items.length * 26 + (items.some((i) => i.sep) ? 4 : 0),
-          props: { dir: p.cwd, items } });
+          props: { dir, items } });
       })
-      .child(div().min_w(0).truncate().child(folder(p.cwd)))
+      .child(div().min_w(0).truncate().child(folder(dir)))
       .child(svg("mods/pane-account/open.svg").size(12).flex_none());
   }
 
@@ -144,7 +144,8 @@ export default class Pane extends View {
         .bg((account === "Work" ? t.accent : t.done) + "26").text_size(10.5).font_semibold()
         .text_color(account === "Work" ? t.accent : t.done).child(account)))
       .when(Boolean(L["agent.model"]), (el) => el.child(div().flex_none().truncate().max_w(140).text_color(t.muted).child(L["agent.model"])))
-      .child(this.openIn(t, p))
+      // Where the agent is really working (agent.cwd, from what it last touched), else the terminal's folder.
+      .child(this.openIn(t, p, L["agent.cwd"] || p.cwd))
       .child(div().flex_1())
       .when(facts.length > 0 && !this.hovered, (el) => el.child(h_flex().flex_none().gap(12).items_center().children(facts)))
       .when(st === "working", el => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))

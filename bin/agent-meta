@@ -26,10 +26,75 @@ def set_labels(labels):
     changed = {k: str(v) for k, v in labels.items() if v is not None and last.get(k) != str(v)}
     if not changed:
         return
-    subprocess.run(["hc", "label", TERM, *[f"{k}={v}" for k, v in changed.items()]], capture_output=True, timeout=5)
+    shown = [f"{k}={v}" for k, v in changed.items() if not k.startswith("_")]  # _keys are bookkeeping
+    if shown:
+        subprocess.run(["hc", "label", TERM, *shown], capture_output=True, timeout=5)
     os.makedirs(os.path.dirname(STATE), exist_ok=True)
     with open(STATE, "w") as f:
         json.dump({**last, **changed}, f)
+
+
+def repo_root(path):
+    """The git checkout (repo or worktree) a path is in, or None."""
+    d = path if os.path.isdir(path) else os.path.dirname(path)
+    while d and d != "/":
+        if os.path.exists(os.path.join(d, ".git")):
+            return d
+        d = os.path.dirname(d)
+    return None
+
+
+def work_dir(transcript):
+    """Where the agent is really working: the checkout of the file it last touched or the folder it
+    last ran a command in. Agents edit and `cd` into other worktrees without leaving the folder
+    they were started in, so the terminal's own folder is often wrong. Read from the transcript's tail."""
+    import re
+    try:
+        size = os.path.getsize(transcript)
+        with open(transcript, "rb") as f:
+            f.seek(max(0, size - 400_000))
+            lines = f.read().decode("utf-8", "ignore").splitlines()
+    except OSError:
+        return None
+    skip = (os.path.expanduser("~/.claude"), os.path.expanduser("~/.codex"), os.path.expanduser("~/.cache"), "/tmp", "/private/tmp", "/var", "/private/var")
+
+    def from_input(inp):
+        if not isinstance(inp, dict):
+            return []
+        out = [inp.get(k) for k in ("file_path", "notebook_path", "path", "workdir", "cwd")]
+        cmd = inp.get("command") or inp.get("cmd") or ""
+        if isinstance(cmd, list):
+            cmd = " ".join(map(str, cmd))
+        # the last folder a command moved into or pointed git at
+        out += reversed(re.findall(r"""(?:\bcd|git\s+-C)\s+["']?(~?/[^\s"'&;|)]+)""", cmd))
+        return [os.path.expanduser(o) for o in out if isinstance(o, str) and o.startswith(("/", "~/"))]
+
+    for line in reversed(lines):
+        if '"tool_use"' not in line and '"function_call"' not in line and '"custom_tool_call"' not in line:
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        inputs = []
+        if e.get("type") == "response_item":  # Codex
+            a = e.get("payload", {}).get("arguments") or e.get("payload", {}).get("input")
+            try:
+                inputs.append(json.loads(a) if isinstance(a, str) else a)
+            except ValueError:
+                pass
+        else:
+            content = (e.get("message") or {}).get("content")
+            if isinstance(content, list):
+                inputs += [c.get("input") for c in reversed(content) if isinstance(c, dict) and c.get("type") == "tool_use"]
+        for inp in inputs:
+            for path in from_input(inp):
+                if path.startswith(skip):
+                    continue
+                root = repo_root(path)
+                if root:
+                    return root
+    return None
 
 
 def alive(pid):
@@ -88,7 +153,8 @@ def codex_watch(pid, home):
                 sid = json.loads(open(path).readline()).get("payload", {}).get("id")
             except (OSError, ValueError):
                 sid = None
-            set_labels({**codex_facts(path), "agent.session": sid, "agent.transcript": path})
+            set_labels({**codex_facts(path), "agent.session": sid, "agent.transcript": path,
+                        "agent.cwd": work_dir(path)})
             # A turn just ended: let agent-shift move this chat if the account is running low.
             done = sum(1 for line in open(path) if '"task_complete"' in line)
             if turns is not None and done > turns:
@@ -100,7 +166,23 @@ def codex_watch(pid, home):
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "set":
-        set_labels(dict(a.split("=", 1) for a in sys.argv[2:]))
+        labels = dict(a.split("=", 1) for a in sys.argv[2:] if not a.startswith("--"))
+        # --workdir-from=<transcript>: also label where the agent is really working (agent.cwd).
+        src = next((a.split("=", 1)[1] for a in sys.argv[2:] if a.startswith("--workdir-from=")), None)
+        if src and TERM:
+            try:
+                last = json.load(open(STATE))
+            except (OSError, ValueError):
+                last = {}
+            size = str(os.path.getsize(src)) if os.path.exists(src) else ""
+            if last.get("_wd_size") != size:  # only re-read when the transcript grew
+                wd = work_dir(src)
+                if wd:
+                    labels["agent.cwd"] = wd
+                labels["_wd_size"] = size
+        set_labels(labels)
+    elif cmd == "workdir":
+        print(work_dir(sys.argv[2]) or "")
     elif cmd == "codex-watch":
         codex_watch(int(sys.argv[2]), sys.argv[3])
     else:
